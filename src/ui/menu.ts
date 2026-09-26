@@ -5,12 +5,12 @@ import { runDoctor, type DoctorOptions } from "../commands/doctor.js";
 import { runInit, type InitOptions } from "../commands/init.js";
 import { runInvestigate, type InvestigateOptions } from "../commands/investigate.js";
 import { saveUserCredentials, saveUserSettings } from "../core/config.js";
-import { keepFoundryLocalAlive, shutdownFoundryLocal } from "../core/foundryModel.js";
+import { ensureModel, keepFoundryLocalAlive, shutdownFoundryLocal } from "../core/foundryModel.js";
 import { VERSION } from "../version.js";
 import { logger } from "../utils/logger.js";
 import { clearScreen, renderLogo } from "./logo.js";
 import { BackToMenu, isUserCancel, terminalPrompter, type Choice, type Prompter } from "./prompter.js";
-import { collectStatus, renderStatus, type Status } from "./status.js";
+import { collectStatus, modelSize, renderStatus, type Status } from "./status.js";
 
 export type MenuChoice = "investigate" | "docs" | "ask" | "setup" | "connect" | "doctor" | "accelerate" | "exit";
 
@@ -29,6 +29,8 @@ export interface MenuDeps {
     saveCredentials: (email: string, pat: string) => string;
     /** Remembers the user's yes/no about enabling the NPU/GPU. */
     setAccelerators: (enabled: boolean) => void;
+    /** Downloads (if needed) and loads the model that will be used, keeping it warm for the actions that follow. */
+    prepareModel: (alias?: string) => Promise<void>;
   };
   log: Pick<typeof logger, "ok" | "info" | "warn" | "error">;
 }
@@ -47,7 +49,12 @@ export function menuChoices(status: Status): Choice<MenuChoice>[] {
   return [
     { name: "Investigate a work item", value: "investigate", disabled: needsRepo, description: "Fetch a work item from Azure DevOps, search this repo for related code, and write a report" },
     { name: "Generate repository docs", value: "docs", disabled: needsRepo, description: "Write an onboarding overview from this repo's real files, manifests and history" },
-    { name: "Ask about this code", value: "ask", description: "Free-form question; the model can list, read and search files and read git history" },
+    {
+      name: "Ask about this code",
+      value: "ask",
+      disabled: status.projectRoot ? false : "open TraceForge inside a project folder",
+      description: "Free-form question; the model can list, read and search files (and read git history in a git repository)",
+    },
     { name: "Set up this repository", value: "setup", disabled: needsRepo, description: "Choose the Azure DevOps organization and project for this repo" },
     { name: status.credentials ? "Update Azure DevOps sign-in" : "Connect Azure DevOps", value: "connect", description: "Store your email and Personal Access Token for every repository (kept in your user folder)" },
     { name: "Check system health", value: "doctor", description: "Verify tools, on-device AI, and the Azure DevOps connection" },
@@ -171,9 +178,31 @@ async function offerAcceleration(deps: MenuDeps): Promise<void> {
   }
 }
 
+/**
+ * The model isn't on disk yet: offer to download and load it now, rather than making the user wait in the middle of
+ * their first question. It also surfaces any problem loading it (e.g. an outdated NPU driver) up front.
+ */
+async function offerModelDownload(deps: MenuDeps, status: Status): Promise<void> {
+  try {
+    const yes = await deps.ui.confirm(
+      `${status.model} isn't downloaded yet${modelSize(status)}. Download and load it now, so your first question is instant?`,
+      true
+    );
+    if (!yes) return; // it will download on first use instead
+    await deps.actions.prepareModel(status.config?.model);
+    await deps.ui.input("↵  Press Enter to continue");
+  } catch (err) {
+    if (err instanceof BackToMenu) return; // Esc: not now
+    if (isUserCancel(err)) throw err;
+    deps.log.error(err instanceof Error ? err.message : String(err));
+    await deps.ui.input("↵  Press Enter to continue");
+  }
+}
+
 /** The menu loop. Returns when the user picks Exit or presses Ctrl+C. */
 export async function runMenu(deps: MenuDeps): Promise<void> {
   let offered = false;
+  let modelOffered = false;
   for (;;) {
     let status: Status;
     try {
@@ -184,6 +213,12 @@ export async function runMenu(deps: MenuDeps): Promise<void> {
         offered = true;
         await offerAcceleration(deps);
         continue; // redraw with the new state
+      }
+
+      if (!modelOffered && status.modelCached === false) {
+        modelOffered = true;
+        await offerModelDownload(deps, status);
+        continue;
       }
 
       const choice = await deps.ui.select("What would you like to do?", menuChoices(status));
@@ -240,6 +275,7 @@ export async function runInteractive(): Promise<void> {
           return path;
         },
         setAccelerators: (enabled) => saveUserSettings({ accelerators: enabled }),
+        prepareModel: async (alias) => void (await ensureModel(alias)),
       },
       log: logger,
     });

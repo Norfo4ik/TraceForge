@@ -14,24 +14,105 @@ export function parseDevicePreference(value: string | undefined): DeviceKind | u
 }
 
 /**
- * Picks the best model variant that can actually run here: one whose execution provider is registered
- * (CPU always is), preferring NPU over GPU over CPU. `force` restricts to one device type — used to compare
- * devices in a demo. Returns undefined when nothing matches (e.g. forcing NPU on a machine without one).
+ * The builds of one model that can actually run here, best first: execution provider registered (CPU always is),
+ * NPU before GPU before CPU. `force` restricts to one device type — used to compare devices in a demo — and
+ * `blocked` skips builds that failed to load before. The order is also the fallback order when a load fails.
  */
+export function rankVariants(
+  variants: VariantInfo[],
+  registeredEps: ReadonlySet<string>,
+  force?: DeviceKind,
+  blocked: ReadonlySet<string> = new Set()
+): VariantInfo[] {
+  const runnable = variants.filter(
+    (v) =>
+      !blocked.has(v.id) &&
+      (v.deviceType === "CPU" ||
+        !v.executionProvider ||
+        v.executionProvider === "CPUExecutionProvider" ||
+        providerRegistered(v, registeredEps))
+  );
+  const candidates = force ? runnable.filter((v) => v.deviceType === force) : runnable;
+  return [...candidates].sort((a, b) => (RANK[b.deviceType] ?? 0) - (RANK[a.deviceType] ?? 0));
+}
+
+/** The best runnable build, or undefined when nothing matches (e.g. forcing NPU on a machine without one). */
 export function chooseVariant(
   variants: VariantInfo[],
   registeredEps: ReadonlySet<string>,
-  force?: DeviceKind
+  force?: DeviceKind,
+  blocked: ReadonlySet<string> = new Set()
 ): VariantInfo | undefined {
-  const runnable = variants.filter(
-    (v) =>
-      v.deviceType === "CPU" ||
-      !v.executionProvider ||
-      v.executionProvider === "CPUExecutionProvider" ||
-      providerRegistered(v, registeredEps)
-  );
-  const candidates = force ? runnable.filter((v) => v.deviceType === force) : runnable;
-  return [...candidates].sort((a, b) => (RANK[b.deviceType] ?? 0) - (RANK[a.deviceType] ?? 0))[0];
+  return rankVariants(variants, registeredEps, force, blocked)[0];
+}
+
+export interface FallbackHooks<T> {
+  describe(build: T): { id: string; device: string; cached: boolean };
+  /** True when `err` happened while loading the model (as opposed to downloading it). */
+  isLoadError(err: unknown): boolean;
+  /** A build failed to load; `next` is what will be tried instead (undefined when nothing is left). */
+  onLoadFailure(build: T, err: unknown, next: T | undefined): void;
+  /** A download failed; `next` is the next build that is already on disk. */
+  onDownloadFailure(build: T, err: unknown, next: T | undefined): void;
+}
+
+/**
+ * Tries the builds in order until one loads. A load failure moves on to the next (lower) device. A download failure
+ * (offline, disk full) can only be helped by a build that's already on disk, so builds that would need a download are
+ * skipped; if there's none, it stops. Pure so every path can be tested without hardware.
+ */
+export async function loadWithFallback<T>(
+  builds: T[],
+  attempt: (build: T) => Promise<void>,
+  hooks: FallbackHooks<T>
+): Promise<{ used: T } | { error: unknown }> {
+  const queue = [...builds];
+  let lastError: unknown = new Error("no build of the model can run on this machine");
+  while (queue.length > 0) {
+    const build = queue.shift() as T;
+    try {
+      await attempt(build);
+      return { used: build };
+    } catch (err) {
+      lastError = err;
+      if (hooks.isLoadError(err)) {
+        hooks.onLoadFailure(build, err, queue[0]);
+      } else {
+        const onDisk = queue.findIndex((b) => hooks.describe(b).cached);
+        if (onDisk === -1) return { error: err };
+        queue.splice(0, onDisk);
+        hooks.onDownloadFailure(build, err, queue[0]);
+      }
+    }
+  }
+  return { error: lastError };
+}
+
+export interface LoadFailure {
+  /** One plain-English sentence: what went wrong. */
+  summary: string;
+  /** What the user can do about it, when we know. */
+  hint?: string;
+}
+
+/**
+ * Turns a native model-load error (a wall of stack-like text from the inference runtime) into something a person can
+ * act on. The NPU case is real, from an Intel Core Ultra PC: the model's NPU build was compiled for a newer NPU
+ * compiler interface (8.2) than the installed NPU driver supports (8.1).
+ */
+export function explainLoadFailure(message: string): LoadFailure {
+  const npuApi = /API version[^\n]*?Found:\s*([\d.]+?)\.?\s+Expected:\s*([\d.]+)/i.exec(message);
+  if (npuApi) {
+    return {
+      summary: `the NPU driver on this PC is older than this model build needs (built for NPU compiler API ${npuApi[1]}, driver supports ${npuApi[2]})`,
+      hint: 'Update the Intel NPU driver (Windows Update → Advanced options → Optional updates, or your PC maker\'s / Intel\'s driver page), restart, then choose "Enable NPU / GPU acceleration" to try again.',
+    };
+  }
+  if (/out of memory|bad_alloc|insufficient memory|not enough memory/i.test(message)) {
+    return { summary: "there isn't enough free memory to load this model", hint: "Close other applications, or pick a smaller model with TRACEFORGE_MODEL." };
+  }
+  const firstLine = message.split("\n").map((l) => l.trim()).find(Boolean) ?? "unknown error";
+  return { summary: firstLine.length > 160 ? `${firstLine.slice(0, 160)}…` : firstLine };
 }
 
 /** Execution-provider names that indicate an NPU (Qualcomm QNN, Intel OpenVINO, AMD Vitis AI, generic). */

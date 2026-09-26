@@ -4,12 +4,16 @@ import chalk from "chalk";
 import { isNpuProvider } from "../core/accelerators.js";
 import { hasAdoCredentials, loadConfig, loadUserSettings, type TraceForgeConfig } from "../core/config.js";
 import { getManager, planModel, prepareAccelerators, resolveModelAlias } from "../core/foundryModel.js";
-import { getRepoRoot } from "../core/repoTools.js";
+import { getRepoRoot, resolveProject } from "../core/repoTools.js";
 
 export type NpuState = "registered" | "available" | "none" | "unknown";
 
 export interface Status {
+  /** The git repository containing the current folder, if any. */
   repoRoot?: string;
+  /** What Ask can look at: the git repository, or else the current folder if it looks like a project. */
+  projectRoot?: string;
+  projectKind?: "git" | "folder";
   branch?: string;
   config?: TraceForgeConfig;
   credentials: boolean;
@@ -21,6 +25,9 @@ export interface Status {
   switchedFrom?: string;
   /** The user's saved answer to "use the NPU/GPU?": undefined until they've been asked. */
   acceleratorDecision?: boolean;
+  /** Whether the model that will be used is already on disk (undefined when unknown). */
+  modelCached?: boolean;
+  modelSizeMb?: number;
   npu: NpuState;
 }
 
@@ -43,6 +50,10 @@ export async function collectStatus(): Promise<Status> {
     acceleratorDecision: loadUserSettings().accelerators,
   };
 
+  const project = resolveProject();
+  status.projectRoot = project?.root;
+  status.projectKind = project?.kind;
+
   try {
     status.repoRoot = getRepoRoot();
     status.branch = currentBranch(status.repoRoot);
@@ -60,10 +71,17 @@ export async function collectStatus(): Promise<Status> {
     status.device = plan.device;
     status.model = plan.alias;
     status.switchedFrom = plan.switchedFrom;
+    status.modelCached = plan.cached;
+    status.modelSizeMb = plan.sizeMb;
   } catch {
     // Foundry Local unavailable — shown as unknown
   }
   return status;
+}
+
+/** " (2.2 GB)" for the size of a download, or nothing when unknown. */
+export function modelSize(status: Pick<Status, "modelSizeMb">): string {
+  return status.modelSizeMb ? ` (${(status.modelSizeMb / 1000).toFixed(1)} GB)` : "";
 }
 
 export function renderStatus(status: Status, color = true): string {
@@ -77,7 +95,9 @@ export function renderStatus(status: Status, color = true): string {
 
   const repo = status.repoRoot
     ? `${c.accent(basename(status.repoRoot))}${status.branch ? c.label(`  (${status.branch})`) : ""}`
-    : c.warn("not inside a git repository — open TraceForge in one to investigate or document it");
+    : status.projectRoot
+      ? `${c.accent(basename(status.projectRoot))}  ${c.label("(a folder, not a git repository — Ask works here; Investigate and Docs need git)")}`
+      : c.warn("no project here — open TraceForge in a project folder (a git repository to investigate or document it)");
 
   let ado: string;
   if (!status.config) {
@@ -96,7 +116,8 @@ export function renderStatus(status: Status, color = true): string {
   };
   const chosenDevice = status.device?.split(" ")[0] ?? "NPU/GPU";
   const switched = status.switchedFrom ? `\n${" ".repeat(17)}${c.label(`auto-selected: ${status.switchedFrom} has no ${chosenDevice} build here`)}` : "";
-  const ai = `${c.accent(status.model)} ${c.label("on")} ${status.device ?? c.label("…")}  ${c.label("·")}  ${npuText[status.npu]}${switched}`;
+  const download = status.modelCached === false ? `  ${c.label("·")}  ${c.warn(`not downloaded yet${modelSize(status)}`)}` : "";
+  const ai = `${c.accent(status.model)} ${c.label("on")} ${status.device ?? c.label("…")}  ${c.label("·")}  ${npuText[status.npu]}${download}${switched}`;
 
   return [row("Repository", repo), row("Azure DevOps", ado), row("On-device AI", ai)].join("\n");
 }

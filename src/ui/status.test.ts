@@ -28,9 +28,21 @@ describe("renderStatus", () => {
     expect(unused).toContain("NPU ready, but this model isn't using it");
   });
 
+  it("says when the model still has to be downloaded, with its size", () => {
+    expect(renderStatus({ ...base, model: "phi-4-mini", device: "NPU (OpenVINOExecutionProvider)", npu: "registered", modelCached: false, modelSizeMb: 2200 }, false)).toContain(
+      "not downloaded yet (2.2 GB)"
+    );
+    expect(renderStatus({ ...base, modelCached: false }, false)).toContain("not downloaded yet");
+    expect(renderStatus({ ...base, modelCached: true, modelSizeMb: 2200 }, false)).not.toContain("not downloaded");
+  });
+
   it("tells the user what to do when things are missing", () => {
     const outsideRepo = renderStatus({ ...base, credentials: false }, false);
-    expect(outsideRepo).toContain("not inside a git repository");
+    expect(outsideRepo).toContain("no project here");
+
+    const plainFolder = renderStatus({ ...base, projectRoot: "C:/work/MyApp", projectKind: "folder" }, false);
+    expect(plainFolder).toContain("MyApp");
+    expect(plainFolder).toContain("a folder, not a git repository — Ask works here");
 
     const unconfigured = renderStatus({ ...base, repoRoot: "C:/repos/Demo" }, false);
     expect(unconfigured).toContain("Set up this repository");

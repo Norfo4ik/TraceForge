@@ -69,7 +69,9 @@ async function cancellable<T>(run: (signal: AbortSignal) => Promise<T>): Promise
 }
 
 export const terminalPrompter: Prompter = {
-  select: (message, choices) => select({ message, choices, theme, pageSize: 12, loop: false }),
+  // Start on the first choice that can actually be picked, not on a greyed-out one.
+  select: (message, choices) =>
+    select({ message, choices, theme, pageSize: 12, loop: false, default: choices.find((c) => !c.disabled)?.value }),
   input: (message, options) =>
     cancellable((signal) =>
       input({ message: message + BACK_HINT, theme, default: options?.default, validate: options?.validate }, { signal })

@@ -9,6 +9,8 @@ class FakeCancel extends Error {
 
 const configured: Status = {
   repoRoot: "C:/repos/Demo",
+  projectRoot: "C:/repos/Demo",
+  projectKind: "git",
   config: { organization: "Contoso", project: "Demo", domains: ["work-items"] },
   credentials: true,
   email: "me@example.com",
@@ -49,6 +51,7 @@ function harness(answers: unknown[], statuses: Status[] = [configured]) {
         return "/home/me/.traceforge/.env";
       },
       setAccelerators: (enabled) => void calls.push(["setAccelerators", enabled]),
+      prepareModel: async (alias) => void calls.push(["prepareModel", alias]),
     },
     log: {
       ok: (m) => void logs.push(`ok: ${m}`),
@@ -199,15 +202,79 @@ describe("first-launch NPU offer", () => {
   });
 });
 
+describe("first-launch model download offer", () => {
+  const notDownloaded: Status = { ...configured, model: "phi-4-mini", modelCached: false, modelSizeMb: 2200 };
+  const downloaded: Status = { ...notDownloaded, modelCached: true };
+
+  it("downloads and loads the model up front when the user says yes", async () => {
+    const h = harness([true, "", "exit"], [notDownloaded, downloaded]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([["prepareModel", undefined]]);
+    expect(h.remaining()).toBe(0);
+  });
+
+  it("does nothing on no — it downloads on first use instead — and doesn't ask again this session", async () => {
+    const h = harness([false, "exit"], [notDownloaded]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([]);
+    expect(h.remaining()).toBe(0);
+  });
+
+  it("Esc means not now", async () => {
+    const h = harness([new BackToMenu(), "exit"], [notDownloaded]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([]);
+    expect(h.logs).toEqual([]);
+  });
+
+  it("shows a failed preparation as a message, not a crash, and returns to the menu", async () => {
+    const h = harness([true, "", "exit"], [notDownloaded]);
+    h.deps.actions.prepareModel = async () => {
+      throw new Error("phi-4-mini could not be loaded on any available device");
+    };
+    await runMenu(h.deps);
+    expect(h.logs).toContain("error: phi-4-mini could not be loaded on any available device");
+    expect(h.remaining()).toBe(0);
+  });
+
+  it("does not ask when the model is already downloaded or unknown", async () => {
+    const cached = harness(["exit"], [downloaded]);
+    await runMenu(cached.deps);
+    expect(cached.calls).toEqual([]);
+    const unknown = harness(["exit"], [{ ...notDownloaded, modelCached: undefined }]);
+    await runMenu(unknown.deps);
+    expect(unknown.calls).toEqual([]);
+  });
+
+  it("asks about the NPU first, then about the download", async () => {
+    const npuFound: Status = { ...notDownloaded, npu: "available", acceleratorDecision: undefined };
+    const npuOn: Status = { ...notDownloaded, npu: "registered", acceleratorDecision: true };
+    const h = harness([true, "", true, "", "exit"], [npuFound, npuOn, { ...npuOn, modelCached: true }]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([["doctor", { accelerate: true }], ["prepareModel", undefined]]);
+  });
+});
+
 describe("menuChoices", () => {
-  it("disables repository actions outside a git repository, but keeps Ask and Connect available", () => {
+  it("disables every code-related action outside a git repository (Ask would only invent a project), but keeps sign-in and health checks", () => {
     const choices = menuChoices({ credentials: false, model: "qwen3-4b", npu: "none" });
     const byValue = Object.fromEntries(choices.map((c) => [c.value, c]));
-    expect(byValue.investigate.disabled).toBeTruthy();
-    expect(byValue.docs.disabled).toBeTruthy();
-    expect(byValue.setup.disabled).toBeTruthy();
-    expect(byValue.ask.disabled).toBeFalsy();
+    for (const value of ["investigate", "docs", "ask", "setup"]) expect(byValue[value].disabled).toBeTruthy();
+    expect(byValue.connect.disabled).toBeFalsy();
+    expect(byValue.doctor.disabled).toBeFalsy();
+    expect(byValue.accelerate.disabled).toBeFalsy();
     expect(byValue.connect.name).toBe("Connect Azure DevOps");
+  });
+
+  it("enables Ask inside a repository", () => {
+    expect(menuChoices(configured).find((c) => c.value === "ask")!.disabled).toBeFalsy();
+  });
+
+  it("enables Ask in a plain project folder (no git), while Investigate, Docs and Setup still need a repository", () => {
+    const folder: Status = { credentials: true, model: "qwen3-4b", npu: "none", projectRoot: "C:/work/MyApp", projectKind: "folder" };
+    const byValue = Object.fromEntries(menuChoices(folder).map((c) => [c.value, c]));
+    expect(byValue.ask.disabled).toBeFalsy();
+    for (const value of ["investigate", "docs", "setup"]) expect(byValue[value].disabled).toBeTruthy();
   });
 
   it("offers to update the sign-in once credentials exist", () => {

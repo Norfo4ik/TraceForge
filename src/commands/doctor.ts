@@ -5,7 +5,9 @@ import { connectAdoMcp } from "../core/adoMcpClient.js";
 import { loadConfig, saveUserSettings } from "../core/config.js";
 import {
   acceleratedModels,
+  blockedBuildIds,
   catalogReport,
+  clearBlockedBuilds,
   getManager,
   planModel,
   prepareAccelerators,
@@ -44,6 +46,11 @@ async function checkAccelerators(accelerate: boolean): Promise<void> {
   await prepareAccelerators(); // no-op unless the user opted in earlier; registration doesn't persist across runs
   let eps = manager.discoverEps();
   if (accelerate) {
+    const forgiven = blockedBuildIds().length;
+    if (forgiven > 0) {
+      clearBlockedBuilds();
+      logger.info(`Cleared ${forgiven} build(s) that failed to load earlier — they will be tried again.`);
+    }
     const pending = eps.filter((ep) => !ep.isRegistered);
     let registrationFailed = false;
     if (pending.length === 0) {
@@ -98,6 +105,14 @@ async function checkModel(alias?: string): Promise<void> {
       logger.info(
         `  Auto-selected: ${plan.switchedFrom} (the usual default) has no NPU/GPU build here. ` +
           `Set TRACEFORGE_MODEL to choose a model yourself, or TRACEFORGE_DEVICE=cpu to stay on the CPU.`
+      );
+    }
+
+    const skipped = blockedBuildIds();
+    if (skipped.length > 0) {
+      logger.warn(
+        `  Skipping ${skipped.length} build(s) that failed to load earlier: ${skipped.join(", ")}. ` +
+          `After fixing the cause (for an NPU: update the Intel NPU driver), choose "Enable NPU / GPU acceleration" to try again.`
       );
     }
 

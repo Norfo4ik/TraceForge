@@ -60,13 +60,22 @@ export interface UserSettings {
    * (registration lasts only for the process that did it), false = declined, undefined = never asked.
    */
   accelerators?: boolean;
+  /**
+   * Model builds (by id) that failed to load on this machine — e.g. an NPU build the installed NPU driver is too old
+   * for. They are skipped on later starts instead of being downloaded and failed again; choosing "Enable NPU / GPU
+   * acceleration" clears the list so a fixed driver can be tried.
+   */
+  blockedBuilds?: string[];
 }
 
 /** Per-user settings (~/.traceforge/settings.json). A missing or unreadable file just means "no decisions yet". */
 export function loadUserSettings(dir: string = userConfigDir()): UserSettings {
   try {
     const raw = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
-    return typeof raw?.accelerators === "boolean" ? { accelerators: raw.accelerators } : {};
+    const settings: UserSettings = {};
+    if (typeof raw?.accelerators === "boolean") settings.accelerators = raw.accelerators;
+    if (Array.isArray(raw?.blockedBuilds)) settings.blockedBuilds = raw.blockedBuilds.filter((b: unknown) => typeof b === "string");
+    return settings;
   } catch {
     return {};
   }

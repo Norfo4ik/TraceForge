@@ -13,18 +13,19 @@ const MAX_DEGENERATE_RETRIES = 1;
  * message in the response (there's one per turn, but tool-call turns can
  * still carry one alongside the ToolCallItem).
  */
-function extractAnswerText(output: readonly Item[]): string {
+export function extractAnswerText(output: readonly Item[]): string {
   const chunks: string[] = [];
   for (const item of output) {
     if (item.type === "text" && (item.textType ?? "default") === "default") {
       chunks.push(item.text);
     } else if (item.type === "message" && item.role === "assistant") {
-      if (item.content) chunks.push(item.content);
-      for (const part of item.parts ?? []) {
-        if (part.type === "text" && (part.textType ?? "default") === "default") {
-          chunks.push(part.text);
-        }
-      }
+      const answerParts = (item.parts ?? []).flatMap((part) =>
+        part.type === "text" && (part.textType ?? "default") === "default" ? [part.text] : []
+      );
+      // `content` is a convenience copy of a single default text part, so it must only stand in when there are no
+      // parts — otherwise the same answer is added twice (seen with phi-4-mini, which has no separate reasoning part).
+      if (answerParts.length > 0) chunks.push(...answerParts);
+      else if (item.content) chunks.push(item.content);
     }
   }
   // Defensive cleanup: this model occasionally leaks raw chat-template markers into a

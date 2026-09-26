@@ -14,6 +14,21 @@ describe("user settings", () => {
     expect(loadUserSettings(dir)).toEqual({ accelerators: false });
   });
 
+  it("keeps the accelerator decision when the blocked-builds list is updated, and can clear it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
+    saveUserSettings({ accelerators: true }, dir);
+    saveUserSettings({ blockedBuilds: ["phi-4-mini-instruct-openvino-npu:4"] }, dir);
+    expect(loadUserSettings(dir)).toEqual({ accelerators: true, blockedBuilds: ["phi-4-mini-instruct-openvino-npu:4"] });
+    saveUserSettings({ blockedBuilds: [] }, dir);
+    expect(loadUserSettings(dir).blockedBuilds).toEqual([]);
+  });
+
+  it("ignores non-string entries in the blocked-builds list", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
+    writeFileSync(join(dir, "settings.json"), '{"blockedBuilds":["ok:1",7,null]}');
+    expect(loadUserSettings(dir).blockedBuilds).toEqual(["ok:1"]);
+  });
+
   it("treats a corrupt or wrongly-typed file as no decision instead of failing", () => {
     const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
     writeFileSync(join(dir, "settings.json"), "{ not json");

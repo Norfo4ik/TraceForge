@@ -1,26 +1,31 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
+import { grepFiles, looksLikeProject, walkProject, type ProjectKind } from "./projectFiles.js";
 import type { ToolHandler } from "./toolRegistry.js";
 
 const MAX_FILE_BYTES = 20_000;
 const MAX_GREP_RESULTS = 60;
 
-let cachedRepoRoot: string | undefined;
+// Keyed by folder: a single cached value ignored the `cwd` argument, so asking about a second folder returned the first
+// folder's repository. Only successes are cached — a folder can become a repository (git init) while the app runs.
+const repoRootByCwd = new Map<string, string>();
 
 export function getRepoRoot(cwd: string = process.cwd()): string {
-  if (cachedRepoRoot) return cachedRepoRoot;
+  const cached = repoRootByCwd.get(cwd);
+  if (cached) return cached;
   try {
     // stderr piped (not inherited): "not a git repository" is an expected answer here, not something to print.
-    cachedRepoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
+    repoRootByCwd.set(cwd, root);
+    return root;
   } catch {
     throw new Error(`"${cwd}" is not inside a git repository.`);
   }
-  return cachedRepoRoot;
 }
 
 /** Resolves a repo-relative path and guards against escaping the repo root. */
@@ -58,8 +63,9 @@ export function isNoisePath(path: string): boolean {
  * manifest/README/entry-point contents, and recent commits — so the model summarizes evidence
  * instead of guessing what "a typical repo" contains.
  */
-export function gatherRepoOverview(repoRoot: string): { text: string; fileCount: number } {
-  const files = git(repoRoot, ["ls-files"]).split("\n").filter((f) => f && !isNoisePath(f));
+export function gatherRepoOverview(repoRoot: string, kind: ProjectKind = "git"): { text: string; fileCount: number } {
+  const walked = kind === "git" ? undefined : walkProject(repoRoot);
+  const files = (walked ? walked.files : git(repoRoot, ["ls-files"]).split("\n")).filter((f) => f && !isNoisePath(f));
   // Shallowest match wins, so a solution-style layout (Repo/Project/Program.cs) is found as well as a flat one.
   const pick = (re: RegExp) =>
     files.filter((f) => re.test(f)).sort((a, b) => a.split("/").length - b.split("/").length || a.length - b.length)[0];
@@ -79,8 +85,10 @@ export function gatherRepoOverview(repoRoot: string): { text: string; fileCount:
     ),
   ].slice(0, 5);
 
+  const label = kind === "git" ? "Tracked files" : "Project files";
+  const partial = walked?.truncated ? ", folder is larger than the scan limit" : "";
   const sections: string[] = [
-    `Tracked files (${files.length}${files.length > 100 ? ", first 100 shown" : ""}):\n${files.slice(0, 100).join("\n")}`,
+    `${label} (${files.length}${files.length > 100 ? ", first 100 shown" : ""}${partial}):\n${files.slice(0, 100).join("\n")}`,
   ];
   for (const rel of keyPaths) {
     try {
@@ -91,13 +99,29 @@ export function gatherRepoOverview(repoRoot: string): { text: string; fileCount:
       // unreadable file — skip
     }
   }
-  try {
-    const log = git(repoRoot, ["log", "--max-count=10", "--pretty=format:%h %ad %an: %s", "--date=short"]).trim();
-    sections.push(`--- Recent commits ---\n${log || "(no commits yet)"}`);
-  } catch {
-    sections.push("--- Recent commits ---\n(no commits yet)");
+  if (kind === "folder") {
+    sections.push("--- Recent commits ---\n(this is a plain folder, not a git repository — there is no commit history)");
+  } else {
+    try {
+      const log = git(repoRoot, ["log", "--max-count=10", "--pretty=format:%h %ad %an: %s", "--date=short"]).trim();
+      sections.push(`--- Recent commits ---\n${log || "(no commits yet)"}`);
+    } catch {
+      sections.push("--- Recent commits ---\n(no commits yet)");
+    }
   }
   return { text: sections.join("\n\n"), fileCount: files.length };
+}
+
+/**
+ * Where TraceForge is looking: the enclosing git repository if there is one, otherwise the current folder when it
+ * looks like a software project (files only — no history). Undefined when there's nothing sensible to look at.
+ */
+export function resolveProject(cwd: string = process.cwd()): { root: string; kind: ProjectKind } | undefined {
+  try {
+    return { root: getRepoRoot(cwd), kind: "git" };
+  } catch {
+    return looksLikeProject(cwd) ? { root: cwd, kind: "folder" } : undefined;
+  }
 }
 
 export interface RepoSearchHit {
@@ -129,8 +153,8 @@ export function searchRepoForTerms(
   return hits;
 }
 
-export function createRepoTools(repoRoot: string = getRepoRoot()): ToolHandler[] {
-  return [
+export function createRepoTools(repoRoot: string = getRepoRoot(), kind: ProjectKind = "git"): ToolHandler[] {
+  const tools: ToolHandler[] = [
     {
       name: "list_files",
       description:
@@ -248,4 +272,45 @@ export function createRepoTools(repoRoot: string = getRepoRoot()): ToolHandler[]
       },
     },
   ];
+  if (kind === "git") return tools;
+
+  // A plain folder has no git, so listing and searching work on the files themselves and the history tools are left
+  // out entirely (a model offered them would call them and get errors, or invent an answer).
+  return tools
+    .filter((t) => t.name !== "git_log" && t.name !== "git_diff")
+    .map((t): ToolHandler => {
+      if (t.name === "list_files") {
+        return {
+          ...t,
+          description: "List the project's files, optionally only those whose path contains the given text (e.g. 'src/' or '.ts'). Skips dependency and build folders.",
+          parameters: { type: "object", properties: { pathspec: { type: "string", description: "Optional text the path must contain, e.g. 'src/' or '.cs'." } } },
+          execute: async (args) => {
+            const filter = typeof args.pathspec === "string" ? args.pathspec.replace(/^\.?\//, "") : "";
+            const files = walkProject(repoRoot).files.filter((f) => !filter || f.includes(filter));
+            return JSON.stringify({ count: files.length, files: files.slice(0, 300) });
+          },
+        };
+      }
+      if (t.name === "grep_repo") {
+        return {
+          ...t,
+          description: "Search the project's text files for a regular expression. Returns matching file:line:text entries.",
+          parameters: {
+            type: "object",
+            properties: {
+              pattern: { type: "string", description: "Regular expression to search for." },
+              pathspec: { type: "string", description: "Optional text the path must contain, e.g. 'src/'." },
+            },
+            required: ["pattern"],
+          },
+          execute: async (args) => {
+            const filter = typeof args.pathspec === "string" ? args.pathspec.replace(/^\.?\//, "") : "";
+            const files = walkProject(repoRoot).files.filter((f) => !filter || f.includes(filter));
+            const matches = grepFiles(repoRoot, files, String(args.pattern ?? ""));
+            return JSON.stringify({ count: matches.length, matches });
+          },
+        };
+      }
+      return t; // read_file works on any file path inside the project
+    });
 }

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   acceleratedVariants,
   chooseVariant,
+  explainLoadFailure,
+  loadWithFallback,
+  rankVariants,
   isChatModelAlias,
   isNpuProvider,
   parseDevicePreference,
@@ -102,6 +105,129 @@ describe("pickDefaultModel", () => {
   it("ranks unlisted models by size", () => {
     const unlisted = [mv("small-x", "NPU", OV, { fileSizeMb: 900 }), mv("big-y", "NPU", OV, { fileSizeMb: 5000 })];
     expect(pickDefaultModel(unlisted, new Set([OV]), "qwen3-4b").alias).toBe("big-y");
+  });
+});
+
+describe("rankVariants (fallback order)", () => {
+  const cpu: VariantInfo = { id: "m-cpu", deviceType: "CPU", executionProvider: "CPUExecutionProvider" };
+  const gpu: VariantInfo = { id: "m-gpu", deviceType: "GPU", executionProvider: WEBGPU };
+  const npu: VariantInfo = { id: "m-npu", deviceType: "NPU", executionProvider: OV };
+  const eps = new Set([OV, WEBGPU]);
+
+  it("orders NPU, GPU, CPU so a failed load can fall back down the list", () => {
+    expect(rankVariants([cpu, gpu, npu], eps).map((v) => v.id)).toEqual(["m-npu", "m-gpu", "m-cpu"]);
+  });
+
+  it("skips builds that failed before, so the next start doesn't retry them", () => {
+    expect(rankVariants([cpu, gpu, npu], eps, undefined, new Set(["m-npu"])).map((v) => v.id)).toEqual(["m-gpu", "m-cpu"]);
+    expect(chooseVariant([cpu, gpu, npu], eps, undefined, new Set(["m-npu", "m-gpu"]))?.id).toBe("m-cpu");
+  });
+});
+
+describe("loadWithFallback", () => {
+  interface B { id: string; device: string; cached: boolean }
+  class LoadErr extends Error {}
+  const builds: B[] = [
+    { id: "npu", device: "NPU", cached: false },
+    { id: "gpu", device: "GPU", cached: false },
+    { id: "cpu", device: "CPU", cached: true },
+  ];
+
+  function run(failures: Record<string, Error>) {
+    const events: string[] = [];
+    const tried: string[] = [];
+    const promise = loadWithFallback(
+      builds,
+      async (b) => {
+        tried.push(b.id);
+        if (failures[b.id]) throw failures[b.id];
+      },
+      {
+        describe: (b) => b,
+        isLoadError: (e) => e instanceof LoadErr,
+        onLoadFailure: (b, _e, next) => void events.push(`load-failed:${b.id}->${next?.id ?? "none"}`),
+        onDownloadFailure: (b, _e, next) => void events.push(`download-failed:${b.id}->${next?.id ?? "none"}`),
+      }
+    );
+    return { promise, events, tried };
+  }
+
+  it("uses the first build when it loads", async () => {
+    const r = run({});
+    expect(await r.promise).toEqual({ used: builds[0] });
+    expect(r.tried).toEqual(["npu"]);
+  });
+
+  it("falls back from a failed NPU load to the GPU, then reports what it dropped", async () => {
+    const r = run({ npu: new LoadErr("driver too old") });
+    expect(await r.promise).toEqual({ used: builds[1] });
+    expect(r.events).toEqual(["load-failed:npu->gpu"]);
+  });
+
+  it("keeps going down to the CPU when NPU and GPU both fail to load", async () => {
+    const r = run({ npu: new LoadErr("a"), gpu: new LoadErr("b") });
+    expect(await r.promise).toEqual({ used: builds[2] });
+    expect(r.tried).toEqual(["npu", "gpu", "cpu"]);
+    expect(r.events).toEqual(["load-failed:npu->gpu", "load-failed:gpu->cpu"]);
+  });
+
+  it("returns the error when every build fails to load", async () => {
+    const boom = new LoadErr("cpu too");
+    const r = run({ npu: new LoadErr("a"), gpu: new LoadErr("b"), cpu: boom });
+    expect(await r.promise).toEqual({ error: boom });
+    expect(r.events.at(-1)).toBe("load-failed:cpu->none");
+  });
+
+  it("after a failed download, skips straight to a build already on disk instead of downloading another", async () => {
+    const r = run({ npu: new Error("offline") });
+    expect(await r.promise).toEqual({ used: builds[2] });
+    expect(r.tried).toEqual(["npu", "cpu"]);
+    expect(r.events).toEqual(["download-failed:npu->cpu"]);
+  });
+
+  it("stops with the download error when nothing on disk can help", async () => {
+    const offline = new Error("offline");
+    const uncached: B[] = [{ id: "a", device: "NPU", cached: false }, { id: "b", device: "GPU", cached: false }];
+    const result = await loadWithFallback(uncached, async () => { throw offline; }, {
+      describe: (b) => b,
+      isLoadError: () => false,
+      onLoadFailure: () => {},
+      onDownloadFailure: () => {},
+    });
+    expect(result).toEqual({ error: offline });
+  });
+
+  it("handles an empty list without throwing", async () => {
+    const result = await loadWithFallback([], async () => {}, { describe: (b: B) => b, isLoadError: () => false, onLoadFailure: () => {}, onDownloadFailure: () => {} });
+    expect("error" in result).toBe(true);
+  });
+});
+
+describe("explainLoadFailure", () => {
+  const realNpuError =
+    "genai_model_instance.cc:59 fl::GenAIModelInstance::GenAIModelInstance failed to load model phi-4-mini-instruct-openvino-npu:4: Exception from src\\inference\\src\\cpp\\core.cpp:120:\n" +
+    "Exception from src\\plugins\\intel_npu\\src\\compiler_adapter\\src\\ze_graph_ext_wrappers.cpp:433:\n" +
+    "Compilation failed. Level0 pfnCreate2 result: ZE_RESULT_ERROR_INVALID_NULL_POINTER, code 0x78000007 - pointer argument may not be nullptr . [NPU_VCL] The API version found in the serialized model is not supported. Found: 8.2. Expected: 8.1\n" +
+    "[NPU_VCL] Failed to parse model info! Incorrect format!";
+
+  it("explains the real NPU driver-too-old failure and says how to fix it", () => {
+    const f = explainLoadFailure(realNpuError);
+    expect(f.summary).toContain("NPU driver on this PC is older");
+    expect(f.summary).toContain("8.2");
+    expect(f.summary).toContain("8.1");
+    expect(f.hint).toContain("Update the Intel NPU driver");
+    expect(f.summary).not.toContain("Exception from");
+  });
+
+  it("recognises out-of-memory", () => {
+    expect(explainLoadFailure("std::bad_alloc").summary).toContain("enough free memory");
+  });
+
+  it("falls back to a short first line for unknown errors instead of dumping everything", () => {
+    const f = explainLoadFailure("\n  Something odd happened\nwith a long\nstack");
+    expect(f.summary).toBe("Something odd happened");
+    expect(f.hint).toBeUndefined();
+    expect(explainLoadFailure("x".repeat(500)).summary.length).toBeLessThan(200);
   });
 });
 

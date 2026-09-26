@@ -1,5 +1,62 @@
 import { describe, expect, it } from "vitest";
-import { createRepoTools, getRepoRoot } from "./repoTools.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRepoTools, gatherRepoOverview, getRepoRoot, resolveProject } from "./repoTools.js";
+
+function plainFolder(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "tf-folder-"));
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(root, rel);
+    mkdirSync(join(abs, ".."), { recursive: true });
+    writeFileSync(abs, content);
+  }
+  return root;
+}
+
+describe("plain folder (no git)", () => {
+  const root = plainFolder({
+    "README.md": "# My App\nA small tool.",
+    "package.json": '{"name":"my-app","scripts":{"start":"node src/index.js"}}',
+    "src/index.js": "function retryOnce() {}\nmodule.exports = {};\n",
+    "node_modules/dep/index.js": "retryOnce",
+  });
+  const tools = createRepoTools(root, "folder");
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+
+  it("offers file tools but not the git history tools", () => {
+    expect(tools.map((t) => t.name).sort()).toEqual(["grep_repo", "list_files", "read_file"]);
+  });
+
+  it("lists project files (without dependencies) and filters by path text", async () => {
+    const all = JSON.parse(await byName.list_files.execute({}));
+    expect(all.files).toEqual(["README.md", "package.json", "src/index.js"]);
+    const src = JSON.parse(await byName.list_files.execute({ pathspec: "src/" }));
+    expect(src.files).toEqual(["src/index.js"]);
+  });
+
+  it("searches file contents and reads files, with the same path guard as git mode", async () => {
+    const found = JSON.parse(await byName.grep_repo.execute({ pattern: "retryOnce" }));
+    expect(found.matches).toEqual(["src/index.js:1:function retryOnce() {}"]);
+    const file = JSON.parse(await byName.read_file.execute({ path: "package.json" }));
+    expect(file.content).toContain("my-app");
+    await expect(byName.read_file.execute({ path: "../outside.txt" })).rejects.toThrow(/escapes the repository root/i);
+  });
+
+  it("builds an overview from the files and says there is no commit history", () => {
+    const overview = gatherRepoOverview(root, "folder").text;
+    expect(overview).toContain("Project files (3):");
+    expect(overview).toContain("--- package.json ---");
+    expect(overview).toContain("--- README.md ---");
+    expect(overview).toContain("not a git repository — there is no commit history");
+    expect(overview).not.toContain("node_modules");
+  });
+
+  it("resolves a plain folder as a project, and nothing for an empty one", () => {
+    expect(resolveProject(root)).toEqual({ root, kind: "folder" });
+    expect(resolveProject(plainFolder({}))).toBeUndefined();
+  });
+});
 
 describe("repoTools", () => {
   const repoRoot = getRepoRoot();

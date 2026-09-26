@@ -27,7 +27,7 @@ Run `traceforge` with no arguments in a git repository to get the menu: the scre
 |---|---|
 | Investigate a work item | Fetches the work item from Azure DevOps, searches the repo for related code, and writes a report. Optionally offers to post it back as a comment (always asks first). |
 | Generate repository docs | Writes an onboarding overview from the repo's real files, manifests and history. |
-| Ask about this code | Free-form question; the model can list, read and search files and read git history. |
+| Ask about this code | Free-form question; the model can list, read and search files, and read git history when the folder is a git repository. Works in a plain project folder too (no `git init` needed) — it just has no history to look at. Outside any project it says so instead of guessing. |
 | Set up this repository | Chooses the Azure DevOps organization and project (accepts a pasted `https://dev.azure.com/<org>` URL). |
 | Connect Azure DevOps | Stores your email and Personal Access Token once, for every repository. |
 | Check system health | Verifies tools, on-device AI and the Azure DevOps connection. |
@@ -91,5 +91,11 @@ traceforge doctor                # shows which device the model will use
 ```
 
 Registration only lasts for one process, so once you've opted in TraceForge re-registers the runtimes automatically every time it starts (quick, since they're already downloaded); set `TRACEFORGE_ACCELERATE=off` to skip that. TraceForge then chooses the device first — NPU, then GPU, then CPU — and the best model with a build for it. Not every model has an NPU/GPU build, so if the usual default (`qwen3-4b`) has none on your machine, TraceForge picks the best model that does and says so (`auto-selected: …` in the status panel and in `doctor`, which also lists every model with an NPU/GPU build on your machine). A model you choose yourself (`TRACEFORGE_MODEL`, or `--model` in setup) is never swapped. If an accelerated model fails to load, it falls back to the CPU build. To compare devices for a demo, force one: `TRACEFORGE_DEVICE=cpu traceforge investigate 1` vs `TRACEFORGE_DEVICE=npu traceforge investigate 1` — the closing timing line shows the device and elapsed time.
+
+### If the NPU build won't load
+
+If a model's NPU build fails to load, TraceForge says why in plain English, tries the next device (GPU, then CPU) and remembers the failure so it doesn't download and fail the same build on every start. A common cause, seen on an Intel Core Ultra PC: *"the NPU driver on this PC is older than this model build needs"* (the model was compiled for NPU compiler API 8.2 but the installed driver supports 8.1). The fix is to **update the Intel NPU driver** (Windows Update → Advanced options → Optional updates, or your PC maker's / Intel's driver page), restart, then choose **Enable NPU / GPU acceleration**, which clears the remembered failures and tries again. `traceforge doctor` lists any builds it is currently skipping. Set `TRACEFORGE_DEBUG=1` to see the inference runtime's own detailed output, which is otherwise hidden.
+
+If the chosen model isn't downloaded yet, the menu offers to download and load it at startup (with its size) so your first question isn't the one that waits.
 
 **Status:** the selection logic is unit-tested, but it has only been run on a CPU-only machine, where Foundry Local offers CPU variants only. NPU execution itself is untested until run on real Copilot+ hardware.

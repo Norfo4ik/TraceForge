@@ -2,15 +2,17 @@ import { FoundryLocalManager, type IModel, type ModelInfo } from "foundry-local-
 import ora from "ora";
 import {
   acceleratedVariants,
-  chooseVariant,
+  explainLoadFailure,
+  loadWithFallback,
   parseDevicePreference,
   pickDefaultModel,
   providersWithoutBuilds,
+  rankVariants,
   summarizeBuilds,
   unregisteredProviders,
   type ModelVariant,
 } from "./accelerators.js";
-import { loadUserSettings } from "./config.js";
+import { loadUserSettings, saveUserSettings } from "./config.js";
 import { logger } from "../utils/logger.js";
 
 // Namespaces Foundry Local's data on disk. Deliberately NOT renamed with the product: changing it may move the
@@ -33,11 +35,34 @@ export function resolveModelAlias(alias?: string): string {
 
 let manager: FoundryLocalManager | undefined;
 
+function debugEnabled(): boolean {
+  const v = process.env.TRACEFORGE_DEBUG?.trim().toLowerCase();
+  return !!v && v !== "0" && v !== "false" && v !== "off";
+}
+
+/** Builds that failed to load on this machine before (see UserSettings.blockedBuilds). */
+export function blockedBuildIds(): string[] {
+  return loadUserSettings().blockedBuilds ?? [];
+}
+
+function blockBuild(id: string): void {
+  const blocked = blockedBuildIds();
+  if (!blocked.includes(id)) saveUserSettings({ blockedBuilds: [...blocked, id] });
+}
+
+/** Forget failed builds — for retrying after a driver update. */
+export function clearBlockedBuilds(): void {
+  if (blockedBuildIds().length > 0) saveUserSettings({ blockedBuilds: [] });
+}
+
 export function getManager(): FoundryLocalManager {
   if (!manager) {
     manager = FoundryLocalManager.create({
       appName: APP_NAME,
       disableNonessentialTelemetry: true,
+      // The native runtime prints its own multi-line errors straight to the terminal (a failed NPU load is ~15 lines
+      // of stack-like text). We report failures ourselves in plain English; TRACEFORGE_DEBUG=1 brings its output back.
+      logLevel: debugEnabled() ? "info" : "fatal",
     });
   }
   return manager;
@@ -193,42 +218,69 @@ async function resolveTarget(alias?: string): Promise<ModelTarget> {
   const explicit = explicitAlias(alias);
   if (explicit) return { alias: explicit };
   const force = parseDevicePreference(process.env.TRACEFORGE_DEVICE);
-  const choice = pickDefaultModel(await catalogVariants(), registeredEps(), DEFAULT_ALIAS, force);
+  const blocked = new Set(blockedBuildIds());
+  const usable = (await catalogVariants()).filter((v) => !blocked.has(v.id));
+  const choice = pickDefaultModel(usable, registeredEps(), DEFAULT_ALIAS, force);
   return { alias: choice.alias, switchedFrom: choice.switchedFrom };
 }
 
-/** Selects the best runnable build (NPU > GPU > CPU, or the one forced via TRACEFORGE_DEVICE) on the model. */
+/**
+ * The model's builds that can run here, best first (NPU > GPU > CPU, or only the device forced via TRACEFORGE_DEVICE),
+ * minus any that failed to load before. This order is also the fallback order when a load fails.
+ */
+function rankedBuilds(model: IModel): IModel[] {
+  const force = parseDevicePreference(process.env.TRACEFORGE_DEVICE);
+  const ranked = rankVariants(
+    model.variants.map((v) => ({ id: v.id, deviceType: String(v.info.deviceType), executionProvider: v.info.executionProvider })),
+    registeredEps(),
+    force,
+    new Set(blockedBuildIds())
+  );
+  return ranked.flatMap((r) => model.variants.filter((v) => v.id === r.id));
+}
+
+/** Selects the best runnable build on the model. */
 function selectBestVariant(model: IModel, alias: string): void {
   const force = parseDevicePreference(process.env.TRACEFORGE_DEVICE);
   if (process.env.TRACEFORGE_DEVICE && !force) {
     logger.warn(`Ignoring TRACEFORGE_DEVICE="${process.env.TRACEFORGE_DEVICE}" (expected npu, gpu or cpu).`);
   }
 
-  const variants = model.variants;
-  const best = chooseVariant(
-    variants.map((v) => ({ id: v.id, deviceType: String(v.info.deviceType), executionProvider: v.info.executionProvider })),
-    registeredEps(),
-    force
-  );
-
+  const [best] = rankedBuilds(model);
   if (!best) {
     if (force) {
       logger.warn(`No ${force} build of "${alias}" is available on this machine — using the default. (Run "traceforge doctor --accelerate" to register NPU/GPU providers.)`);
     }
     return;
   }
-  const chosen = variants.find((v) => v.id === best.id);
-  if (chosen && chosen.id !== model.id) model.selectVariant(chosen);
+  if (best.id !== model.id) model.selectVariant(best);
 }
 
 /** What `ensureModel` would use, without downloading or loading anything — for the status panel and `doctor`. */
-export async function planModel(
-  alias?: string
-): Promise<{ alias: string; cached: boolean; device: string; switchedFrom?: string }> {
+export async function planModel(alias?: string): Promise<{
+  alias: string;
+  cached: boolean;
+  sizeMb?: number;
+  device: string;
+  switchedFrom?: string;
+}> {
   const target = await resolveTarget(alias);
   const model = await getManager().catalog.getModel(target.alias);
   selectBestVariant(model, target.alias);
-  return { alias: target.alias, cached: model.isCached, device: describeDevice(model.info), switchedFrom: target.switchedFrom };
+  return {
+    alias: target.alias,
+    cached: model.isCached,
+    sizeMb: model.info.fileSizeMb,
+    device: describeDevice(model.info),
+    switchedFrom: target.switchedFrom,
+  };
+}
+
+/** Marks a failure as happening while loading (as opposed to downloading), which decides how we recover. */
+class ModelLoadError extends Error {
+  constructor(readonly original: unknown) {
+    super(original instanceof Error ? original.message : String(original));
+  }
 }
 
 async function downloadAndLoad(model: IModel, name: string): Promise<void> {
@@ -251,8 +303,9 @@ async function downloadAndLoad(model: IModel, name: string): Promise<void> {
       await model.load();
       spinner.succeed(`Model "${name}" loaded`);
     } catch (err) {
-      spinner.fail(`Could not load model "${name}"`);
-      throw err;
+      // No red failure line: the caller explains it in plain English and may recover by trying another build.
+      spinner.stop();
+      throw new ModelLoadError(err);
     }
   }
 }
@@ -271,15 +324,46 @@ export async function ensureModel(alias?: string): Promise<LoadedModel> {
     );
   }
 
-  try {
-    await downloadAndLoad(model, name);
-  } catch (err) {
-    // An accelerated build can fail to load (driver, memory, unsupported op). Don't strand the user: use the CPU build.
-    const cpu = model.variants.find((v) => String(v.info.deviceType) === "CPU");
-    if (!cpu || cpu.id === model.id) throw err;
-    logger.warn(`${describeDevice(model.info)} failed (${err instanceof Error ? err.message : String(err)}) — falling back to the CPU build.`);
-    model.selectVariant(cpu);
-    await downloadAndLoad(model, name);
+  // Try the builds best-first. A build can fail to load (an NPU driver older than the model needs, not enough memory…):
+  // say why in plain English, remember it so later starts skip it, and move down to the next device rather than stranding
+  // the user. Whatever gets loaded, `info` below reports the build that actually is.
+  const attempts = rankedBuilds(model);
+  if (attempts.length === 0) attempts.push(model);
+
+  const deviceOf = (b: IModel) => String(b.info.runtime?.deviceType ?? b.info.deviceType);
+  const tryingNext = (next: IModel | undefined) => {
+    if (next) logger.info(`  Trying the ${deviceOf(next)} build instead${next.isCached ? "" : " (needs a download)"}.`);
+  };
+
+  const outcome = await loadWithFallback(
+    attempts,
+    async (build) => {
+      if (build.id !== model.id) model.selectVariant(build);
+      await downloadAndLoad(model, name);
+    },
+    {
+      describe: (b) => ({ id: b.id, device: deviceOf(b), cached: b.isCached }),
+      isLoadError: (err) => err instanceof ModelLoadError,
+      onLoadFailure: (build, err, next) => {
+        const message = (err as Error).message;
+        const why = explainLoadFailure(message);
+        logger.warn(`Couldn't run ${name} on the ${deviceOf(build)}: ${why.summary}.`);
+        if (why.hint) logger.info(`  ${why.hint}`);
+        if (debugEnabled()) logger.info(`  Details: ${message}`);
+        if (deviceOf(build) !== "CPU") blockBuild(build.id); // don't download and fail the same build on every start
+        tryingNext(next);
+      },
+      onDownloadFailure: (build, _err, next) => {
+        logger.warn(`Couldn't download the ${deviceOf(build)} build of ${name}; using a build that is already on this machine.`);
+        tryingNext(next);
+      },
+    }
+  );
+
+  if ("error" in outcome) {
+    const err = outcome.error;
+    const why = err instanceof ModelLoadError ? explainLoadFailure(err.message).summary : err instanceof Error ? err.message : String(err);
+    throw new Error(`${name} could not be loaded on any available device: ${why}`);
   }
 
   const info = model.info;
