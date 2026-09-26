@@ -3,7 +3,7 @@ import ora from "ora";
 import { isNpuProvider } from "../core/accelerators.js";
 import { connectAdoMcp } from "../core/adoMcpClient.js";
 import { loadConfig } from "../core/config.js";
-import { getManager, planModel, registerAccelerators, shutdownFoundryLocal } from "../core/foundryModel.js";
+import { acceleratedModels, getManager, planModel, registerAccelerators, shutdownFoundryLocal } from "../core/foundryModel.js";
 import { getRepoRoot } from "../core/repoTools.js";
 import { logger } from "../utils/logger.js";
 
@@ -78,6 +78,25 @@ async function checkModel(alias?: string): Promise<void> {
   try {
     const plan = await planModel(alias);
     logger.ok(`Model "${plan.alias}" will run on ${plan.device}${plan.cached ? "" : " (not downloaded yet — downloads on first use)"}`);
+    if (plan.switchedFrom) {
+      logger.info(
+        `  Auto-selected: ${plan.switchedFrom} (the usual default) has no NPU/GPU build here. ` +
+          `Set TRACEFORGE_MODEL to choose a model yourself, or TRACEFORGE_DEVICE=cpu to stay on the CPU.`
+      );
+    }
+
+    const accelerated = await acceleratedModels();
+    if (accelerated.length === 0) {
+      logger.info("  No models in the catalog have an NPU/GPU build that this machine can run.");
+      return;
+    }
+    const byAlias = new Map<string, string[]>();
+    for (const v of accelerated) {
+      const entry = `${v.deviceType}${v.fileSizeMb ? ` ${(v.fileSizeMb / 1000).toFixed(1)}GB` : ""}${v.supportsToolCalling ? ", tools" : ""}`;
+      byAlias.set(v.alias, [...(byAlias.get(v.alias) ?? []), entry]);
+    }
+    logger.info(`  Models with an NPU/GPU build on this machine (${byAlias.size}):`);
+    for (const [name, entries] of byAlias) logger.info(`    ${name}  [${entries.join(" | ")}]`);
   } catch (err) {
     logger.error(`Model lookup failed: ${(err as Error).message}`);
   }

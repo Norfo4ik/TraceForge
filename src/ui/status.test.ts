@@ -8,14 +8,24 @@ describe("renderStatus", () => {
 
   it("shows repo, Azure DevOps sign-in and the on-device AI device", () => {
     const out = renderStatus(
-      { ...base, repoRoot: "C:/repos/Demo", branch: "main", config: { organization: "Contoso", project: "Demo", domains: [] }, device: "CPU (CPUExecutionProvider)", npu: "registered" },
+      { ...base, repoRoot: "C:/repos/Demo", branch: "main", config: { organization: "Contoso", project: "Demo", domains: [] }, device: "CPU (CPUExecutionProvider)", npu: "none" },
       false
     );
     expect(out).toContain("Demo  (main)");
     expect(out).toContain("Contoso / Demo");
     expect(out).toContain("signed in as me@example.com");
     expect(out).toContain("qwen3-4b on CPU (CPUExecutionProvider)");
-    expect(out).toContain("NPU ready");
+    expect(out).toContain("no NPU on this machine");
+  });
+
+  it("says when the model is running on the NPU, and when an NPU is ready but unused", () => {
+    const onNpu = renderStatus({ ...base, model: "phi-3.5-mini", device: "NPU (OpenVINOExecutionProvider)", npu: "registered", switchedFrom: "qwen3-4b" }, false);
+    expect(onNpu).toContain("phi-3.5-mini on NPU (OpenVINOExecutionProvider)");
+    expect(onNpu).toContain("running on the NPU");
+    expect(onNpu).toContain("auto-selected: qwen3-4b has no NPU/GPU build here");
+
+    const unused = renderStatus({ ...base, device: "CPU (CPUExecutionProvider)", npu: "registered" }, false);
+    expect(unused).toContain("NPU ready, but this model isn't using it");
   });
 
   it("tells the user what to do when things are missing", () => {

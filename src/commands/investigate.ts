@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import ora from "ora";
-import { ensureModel, describeDevice, logOnDeviceSummary, resolveModelAlias, shutdownFoundryLocal } from "../core/foundryModel.js";
+import { ensureModel, describeDevice, logOnDeviceSummary, shutdownFoundryLocal } from "../core/foundryModel.js";
 import { createSession, runTurn } from "../core/agentLoop.js";
 import { ToolRegistry } from "../core/toolRegistry.js";
 import { gatherRepoOverview, getRepoRoot, searchRepoForTerms } from "../core/repoTools.js";
@@ -87,7 +87,7 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
       `${brief.text}\n\n---\nKeyword search of the repository (terms taken from the work item; matches can be coincidental):\n${hitsText}` +
       `\n\n---\nRepository overview:\n${overview.text}\n\nWrite the investigation report now.`;
 
-    const { model, info } = await ensureModel(config.model);
+    const { model, info, alias } = await ensureModel(config.model);
     agent = createSession(model);
     const startedAt = Date.now();
     const report = await runTurn(agent, INVESTIGATE_SYSTEM_PROMPT, userMessage, new ToolRegistry(), {
@@ -108,7 +108,7 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
     logOnDeviceSummary(info, startedAt);
 
     if (opts.postComment && ado) {
-      const comment = formatCommentBody(report, `${resolveModelAlias(config.model)} on ${describeDevice(info)}`);
+      const comment = formatCommentBody(report, `${alias} on ${describeDevice(info)}`);
       const target = `${brief.type} #${brief.id} in ${config.organization}/${config.project}`;
       let approved = opts.yes === true;
       if (!approved) {

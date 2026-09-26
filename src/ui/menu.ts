@@ -49,7 +49,14 @@ export function menuChoices(status: Status): Choice<MenuChoice>[] {
     { name: "Set up this repository", value: "setup", disabled: needsRepo, description: "Choose the Azure DevOps organization and project for this repo" },
     { name: status.credentials ? "Update Azure DevOps sign-in" : "Connect Azure DevOps", value: "connect", description: "Store your email and Personal Access Token for every repository (kept in your user folder)" },
     { name: "Check system health", value: "doctor", description: "Verify tools, on-device AI, and the Azure DevOps connection" },
-    { name: "Enable NPU / GPU acceleration", value: "accelerate", description: "Download and register accelerator runtimes so models run on the NPU or GPU" },
+    {
+      name: "Enable NPU / GPU acceleration",
+      value: "accelerate",
+      description:
+        status.npu === "available"
+          ? "Recommended: an NPU was detected but isn't enabled yet. Downloads its runtime, then models run on the NPU automatically"
+          : "Download and register accelerator runtimes so models run on the NPU or GPU",
+    },
     { name: "Exit", value: "exit" },
   ];
 }

@@ -90,6 +90,6 @@ traceforge doctor --accelerate   # one-time: downloads and registers the provide
 traceforge doctor                # shows which device the model will use
 ```
 
-After that, model loading prefers an NPU variant, then GPU, then CPU. To compare devices for a demo, force one: `TRACEFORGE_DEVICE=cpu traceforge investigate 1` vs `TRACEFORGE_DEVICE=npu traceforge investigate 1` — the closing timing line shows the device and elapsed time.
+After that, TraceForge uses the accelerator automatically (NPU first, then GPU, then CPU). Not every model has an NPU/GPU build, so if the usual default (`qwen3-4b`) has none on your machine, TraceForge picks the best model that does and says so (`auto-selected: …` in the status panel and in `doctor`, which also lists every model with an NPU/GPU build on your machine). A model you choose yourself (`TRACEFORGE_MODEL`, or `--model` in setup) is never swapped. If an accelerated model fails to load, it falls back to the CPU build. To compare devices for a demo, force one: `TRACEFORGE_DEVICE=cpu traceforge investigate 1` vs `TRACEFORGE_DEVICE=npu traceforge investigate 1` — the closing timing line shows the device and elapsed time.
 
 **Status:** the selection logic is unit-tested, but it has only been run on a CPU-only machine, where Foundry Local offers CPU variants only. NPU execution itself is untested until run on real Copilot+ hardware.

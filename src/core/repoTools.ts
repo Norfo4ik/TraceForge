@@ -11,7 +11,12 @@ let cachedRepoRoot: string | undefined;
 export function getRepoRoot(cwd: string = process.cwd()): string {
   if (cachedRepoRoot) return cachedRepoRoot;
   try {
-    cachedRepoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf-8" }).trim();
+    // stderr piped (not inherited): "not a git repository" is an expected answer here, not something to print.
+    cachedRepoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
   } catch {
     throw new Error(`"${cwd}" is not inside a git repository.`);
   }

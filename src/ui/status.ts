@@ -17,6 +17,8 @@ export interface Status {
   model: string;
   /** e.g. "CPU (CPUExecutionProvider)"; undefined when it couldn't be determined. */
   device?: string;
+  /** Set when the usual default model was swapped for one that can use the NPU/GPU. */
+  switchedFrom?: string;
   npu: NpuState;
 }
 
@@ -45,7 +47,10 @@ export async function collectStatus(): Promise<Status> {
   try {
     const eps = getManager().discoverEps().filter((ep) => isNpuProvider(ep.name));
     status.npu = eps.some((e) => e.isRegistered) ? "registered" : eps.length ? "available" : "none";
-    status.device = (await planModel(status.config?.model)).device;
+    const plan = await planModel(status.config?.model);
+    status.device = plan.device;
+    status.model = plan.alias;
+    status.switchedFrom = plan.switchedFrom;
   } catch {
     // Foundry Local unavailable — shown as unknown
   }
@@ -73,13 +78,15 @@ export function renderStatus(status: Status, color = true): string {
     ado = `${c.accent(`${status.config.organization} / ${status.config.project}`)}  ${who}`;
   }
 
+  const onNpu = status.device?.startsWith("NPU") ?? false;
   const npuText: Record<NpuState, string> = {
-    registered: c.ok("NPU ready"),
+    registered: onNpu ? c.ok("running on the NPU") : c.warn("NPU ready, but this model isn't using it"),
     available: c.warn("NPU available, not enabled"),
     none: c.label("no NPU on this machine"),
     unknown: c.label("device unknown"),
   };
-  const ai = `${c.accent(status.model)} ${c.label("on")} ${status.device ?? c.label("…")}  ${c.label("·")}  ${npuText[status.npu]}`;
+  const switched = status.switchedFrom ? `\n${" ".repeat(17)}${c.label(`auto-selected: ${status.switchedFrom} has no NPU/GPU build here`)}` : "";
+  const ai = `${c.accent(status.model)} ${c.label("on")} ${status.device ?? c.label("…")}  ${c.label("·")}  ${npuText[status.npu]}${switched}`;
 
   return [row("Repository", repo), row("Azure DevOps", ado), row("On-device AI", ai)].join("\n");
 }
