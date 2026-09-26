@@ -1,0 +1,56 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "TraceForge: Investigate work item",
+      "type": "shell",
+      "command": "traceforge investigate ${input:workItemId}",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "TraceForge: Investigate work item and post comment",
+      "type": "shell",
+      "command": "traceforge investigate ${input:workItemId} --post-comment",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "TraceForge: Generate repository docs",
+      "type": "shell",
+      "command": "traceforge docs",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "TraceForge: Doctor (check setup)",
+      "type": "shell",
+      "command": "traceforge doctor",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "workItemId",
+      "type": "promptString",
+      "description": "Azure DevOps work item ID"
+    }
+  ]
+}

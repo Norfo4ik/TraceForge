@@ -1,0 +1,35 @@
+{
+  "name": "traceforge",
+  "version": "0.1.0",
+  "description": "TraceForge — an on-device AI CLI that investigates Azure DevOps work items and documents your repo, powered by Foundry Local and MCP.",
+  "type": "module",
+  "bin": {
+    "traceforge": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --target node20 --clean",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@inquirer/prompts": "^8.7.2",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "chalk": "^6.0.0",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.4",
+    "foundry-local-sdk": "^2.0.1",
+    "ora": "^9.4.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

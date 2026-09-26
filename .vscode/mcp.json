@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "traceforge-repo": {
+      "type": "stdio",
+      "command": "traceforge",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
