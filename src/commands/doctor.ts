@@ -5,6 +5,7 @@ import { connectAdoMcp } from "../core/adoMcpClient.js";
 import { loadConfig, saveUserSettings } from "../core/config.js";
 import {
   acceleratedModels,
+  catalogReport,
   getManager,
   planModel,
   prepareAccelerators,
@@ -98,6 +99,18 @@ async function checkModel(alias?: string): Promise<void> {
         `  Auto-selected: ${plan.switchedFrom} (the usual default) has no NPU/GPU build here. ` +
           `Set TRACEFORGE_MODEL to choose a model yourself, or TRACEFORGE_DEVICE=cpu to stay on the CPU.`
       );
+    }
+
+    const report = await catalogReport();
+    for (const provider of report.unused) {
+      logger.warn(
+        `  ${provider} is registered, but no model in the catalog uses it — the catalog may not have picked up the registration. ` +
+          `Restart TraceForge; if this persists, run "traceforge doctor --accelerate" and send the output.`
+      );
+    }
+    if (report.builds.length) {
+      logger.info("  NPU/GPU builds in the catalog, per runtime:");
+      for (const line of report.builds) logger.info(`    ${line}`);
     }
 
     const accelerated = await acceleratedModels();

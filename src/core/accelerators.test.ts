@@ -6,6 +6,8 @@ import {
   isNpuProvider,
   parseDevicePreference,
   pickDefaultModel,
+  providersWithoutBuilds,
+  summarizeBuilds,
   unregisteredProviders,
   type ModelVariant,
   type VariantInfo,
@@ -100,6 +102,25 @@ describe("pickDefaultModel", () => {
   it("ranks unlisted models by size", () => {
     const unlisted = [mv("small-x", "NPU", OV, { fileSizeMb: 900 }), mv("big-y", "NPU", OV, { fileSizeMb: 5000 })];
     expect(pickDefaultModel(unlisted, new Set([OV]), "qwen3-4b").alias).toBe("big-y");
+  });
+});
+
+describe("catalog self-check", () => {
+  it("flags a registered runtime that no build in the catalog uses (a stale catalog)", () => {
+    const stale = [mv("deepseek-r1-1.5b", "GPU", OV), mv("qwen3-4b", "CPU", "CPUExecutionProvider")];
+    expect(providersWithoutBuilds(new Set([OV, WEBGPU]), stale)).toEqual([WEBGPU]);
+  });
+
+  it("is quiet when every registered runtime has builds, matching names loosely", () => {
+    const full = [mv("a", "NPU", "OpenVINO"), mv("b", "GPU", WEBGPU)];
+    expect(providersWithoutBuilds(new Set([OV, WEBGPU]), full)).toEqual([]);
+    expect(providersWithoutBuilds(new Set(), full)).toEqual([]);
+  });
+
+  it("summarises builds per runtime and ignores CPU builds", () => {
+    const v = [mv("a", "NPU", OV), mv("b", "NPU", OV), mv("c", "GPU", OV), mv("d", "GPU", WEBGPU), mv("e", "CPU", "CPUExecutionProvider")];
+    expect(summarizeBuilds(v)).toEqual([`${OV}: NPU ×2, GPU ×1`, `${WEBGPU}: GPU ×1`]);
+    expect(summarizeBuilds([mv("e", "CPU", "CPUExecutionProvider")])).toEqual([]);
   });
 });
 

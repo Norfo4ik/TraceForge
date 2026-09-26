@@ -5,6 +5,8 @@ import {
   chooseVariant,
   parseDevicePreference,
   pickDefaultModel,
+  providersWithoutBuilds,
+  summarizeBuilds,
   unregisteredProviders,
   type ModelVariant,
 } from "./accelerators.js";
@@ -66,9 +68,7 @@ function registeredEps(): Set<string> {
 
 let variantCache: ModelVariant[] | undefined;
 
-/** Every build (CPU / GPU / NPU) of every model in the catalog, flattened. Cached; cleared when providers change. */
-async function catalogVariants(): Promise<ModelVariant[]> {
-  if (variantCache) return variantCache;
+async function scanCatalog(): Promise<ModelVariant[]> {
   const found = new Map<string, ModelVariant>();
   const add = (m: IModel) => {
     if (found.has(m.id)) return;
@@ -86,8 +86,37 @@ async function catalogVariants(): Promise<ModelVariant[]> {
     add(model);
     for (const variant of model.variants) add(variant);
   }
-  variantCache = [...found.values()];
+  return [...found.values()];
+}
+
+let catalogRepaired = false;
+
+/**
+ * Every build (CPU / GPU / NPU) of every model in the catalog, flattened. Cached; cleared when providers change.
+ * If a runtime is registered but no model uses it, the catalog didn't pick the registration up (seen on real
+ * hardware: 1 model listed instead of 35), so register once more and rescan — once — before trusting the result.
+ */
+async function catalogVariants(): Promise<ModelVariant[]> {
+  if (variantCache) return variantCache;
+  let variants = await scanCatalog();
+
+  if (!catalogRepaired && providersWithoutBuilds(registeredEps(), variants).length > 0) {
+    catalogRepaired = true;
+    try {
+      await getManager().downloadAndRegisterEps(() => {});
+      variants = await scanCatalog();
+    } catch {
+      // keep what we have; doctor shows the per-runtime build counts so the situation is visible
+    }
+  }
+  variantCache = variants;
   return variantCache;
+}
+
+/** How many NPU/GPU builds the catalog offers per registered runtime, and any registered runtime with none. */
+export async function catalogReport(): Promise<{ builds: string[]; unused: string[] }> {
+  const variants = await catalogVariants();
+  return { builds: summarizeBuilds(variants), unused: providersWithoutBuilds(registeredEps(), variants) };
 }
 
 /** Models that have an NPU/GPU build this machine can run right now (their runtime is registered). */
@@ -106,11 +135,22 @@ export async function registerAccelerators(
 ): Promise<{ success: boolean; registered: string[]; failed: string[] }> {
   const result = await getManager().downloadAndRegisterEps(onProgress);
   variantCache = undefined;
+  catalogRepaired = false;
   prepared = Promise.resolve();
   return { success: result.success, registered: [...result.registeredEps], failed: [...result.failedEps] };
 }
 
 let prepared: Promise<void> | undefined;
+
+/** Registration can finish a moment after the call returns; wait (briefly) until the runtimes report registered. */
+async function waitUntilRegistered(names: string[], timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const stillPending = unregisteredProviders(getManager().discoverEps()).filter((n) => names.includes(n));
+    if (stillPending.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
 
 /**
  * Registers the NPU/GPU runtimes for this process if the user has opted in. Registration doesn't survive a restart
@@ -125,7 +165,10 @@ export function prepareAccelerators(): Promise<void> {
     const pending = unregisteredProviders(getManager().discoverEps());
     if (pending.length === 0) return;
     try {
-      const result = await getManager().downloadAndRegisterEps(pending);
+      // The register-everything form, like `doctor --accelerate` uses: registering a named list left the model
+      // catalog with 1 model on real hardware where this form produced the full 35.
+      const result = await getManager().downloadAndRegisterEps(() => {});
+      await waitUntilRegistered(pending);
       variantCache = undefined;
       if (result.failedEps.length) logger.warn(`Could not enable ${result.failedEps.join(", ")} — continuing without it.`);
     } catch (err) {

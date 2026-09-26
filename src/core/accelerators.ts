@@ -81,6 +81,29 @@ function providerRegistered(v: VariantInfo, registeredEps: ReadonlySet<string>):
   return v.deviceType === "NPU" && [...registeredEps].some(isNpuProvider);
 }
 
+/**
+ * Registered runtimes that no model in the catalog references. On real hardware the catalog once listed 1 model
+ * after a startup registration but 35 (with NPU builds) after `--accelerate`, with the same runtimes "registered" —
+ * a registered runtime with zero builds means the catalog didn't pick the registration up.
+ */
+export function providersWithoutBuilds(registeredEps: ReadonlySet<string>, variants: ModelVariant[]): string[] {
+  const used = new Set(variants.flatMap((v) => (v.executionProvider ? [normalizeProvider(v.executionProvider)] : [])));
+  return [...registeredEps].filter((name) => name !== "CPUExecutionProvider" && !used.has(normalizeProvider(name)));
+}
+
+/** One line per accelerator runtime: how many NPU/GPU builds the catalog offers for it. For `doctor`. */
+export function summarizeBuilds(variants: ModelVariant[]): string[] {
+  const byProvider = new Map<string, Map<string, number>>();
+  for (const v of variants) {
+    if (v.deviceType === "CPU") continue;
+    const provider = v.executionProvider ?? "(unnamed provider)";
+    const devices = byProvider.get(provider) ?? new Map<string, number>();
+    devices.set(v.deviceType, (devices.get(v.deviceType) ?? 0) + 1);
+    byProvider.set(provider, devices);
+  }
+  return [...byProvider].map(([provider, devices]) => `${provider}: ${[...devices].map(([d, n]) => `${d} ×${n}`).join(", ")}`);
+}
+
 /** Builds that can run on an accelerator right now: not CPU, and their execution provider is registered. */
 export function acceleratedVariants(variants: ModelVariant[], registeredEps: ReadonlySet<string>): ModelVariant[] {
   return variants.filter((v) => v.deviceType !== "CPU" && providerRegistered(v, registeredEps) && isChatModelAlias(v.alias));
