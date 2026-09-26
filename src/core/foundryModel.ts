@@ -13,6 +13,7 @@ import {
   type ModelVariant,
 } from "./accelerators.js";
 import { loadUserSettings, saveUserSettings } from "./config.js";
+import { debugEnabled } from "../utils/debug.js";
 import { logger } from "../utils/logger.js";
 
 // Namespaces Foundry Local's data on disk. Deliberately NOT renamed with the product: changing it may move the
@@ -34,11 +35,6 @@ export function resolveModelAlias(alias?: string): string {
 }
 
 let manager: FoundryLocalManager | undefined;
-
-function debugEnabled(): boolean {
-  const v = process.env.TRACEFORGE_DEBUG?.trim().toLowerCase();
-  return !!v && v !== "0" && v !== "false" && v !== "off";
-}
 
 /** Builds that failed to load on this machine before (see UserSettings.blockedBuilds). */
 export function blockedBuildIds(): string[] {

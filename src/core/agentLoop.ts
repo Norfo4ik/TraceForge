@@ -1,6 +1,7 @@
 import { ChatSession, Item, Request, type IModel, type ToolCallItem } from "foundry-local-sdk";
 import ora from "ora";
 import type { ToolRegistry } from "./toolRegistry.js";
+import { debugEnabled } from "../utils/debug.js";
 import { logger } from "../utils/logger.js";
 
 const MAX_TOOL_ITERATIONS = 8;
@@ -33,7 +34,7 @@ export function extractAnswerText(output: readonly Item[]): string {
   // boundary (often right where the output-token cap cuts generation off), or a whole
   // hallucinated <tool_response> block echoing data it already has (safe to discard
   // outright — it's simply restating a tool result, never the answer itself).
-  return chunks
+  const cleaned = dedupeChunks(chunks)
     .join("")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/<\/?think>/gi, "")
@@ -41,6 +42,53 @@ export function extractAnswerText(output: readonly Item[]): string {
     .replace(/<\/?tool_response>/gi, "")
     .replace(/<\/?tool_call>/gi, "")
     .trim();
+  return cutRestartedAnswer(cleaned);
+}
+
+/**
+ * The runtime can report the same reply in more than one place (a top-level text item and again inside the message).
+ * Drop any chunk that is identical to, or wholly contained in, another chunk so the reply is used once.
+ */
+function dedupeChunks(chunks: string[]): string[] {
+  return chunks.filter((chunk, i) => {
+    const text = chunk.trim();
+    if (!text) return false;
+    return !chunks.some((other, j) => {
+      if (j === i) return false;
+      const o = other.trim();
+      return o.length > text.length ? o.includes(text) : o === text && j < i;
+    });
+  });
+}
+
+/**
+ * Some models (seen with phi-4-mini) finish their answer and then start it again from the top, repeating until the
+ * output limit cuts the last copy short — "the same text almost three times". Copies aren't byte-identical, so instead
+ * of comparing whole texts, look for the answer's own opening (its first ~60 characters) reappearing later and keep
+ * only what comes before that point. Requires the restart to be well into the text so a short repeated phrase can't
+ * truncate a genuine answer.
+ */
+export function cutRestartedAnswer(text: string): string {
+  const trimmed = text.trim();
+  const opening = trimmed.slice(0, 60).trim();
+  if (opening.length < 40) return trimmed;
+  const restart = trimmed.indexOf(opening, opening.length);
+  return restart >= 100 ? trimmed.slice(0, restart).trim() : trimmed;
+}
+
+/** One line describing what a response contained (item kinds and text lengths) — for TRACEFORGE_DEBUG. */
+export function describeOutput(output: readonly Item[]): string {
+  return output
+    .map((item) => {
+      if (item.type === "message") {
+        const parts = (item.parts ?? []).map((p) => (p.type === "text" ? `${p.textType ?? "default"}:${p.text.length}` : p.type)).join(",");
+        return `message(${item.role}) content=${item.content?.length ?? 0} parts=[${parts}]`;
+      }
+      if (item.type === "text") return `text(${item.textType ?? "default"}):${item.text.length}`;
+      if (item.type === "toolCall") return `toolCall(${item.name})`;
+      return item.type;
+    })
+    .join(" | ");
 }
 
 /** Finds the balanced {...} substring starting at or after `fromIndex`, plus the index right after it closes. */
@@ -247,6 +295,11 @@ async function runTurnInner(
   status: ReturnType<typeof startStatus>
 ): Promise<string> {
   const noThink = options.disableThinking === true && agent.supportsNoThink;
+  const send = async (req: Request) => {
+    const response = await agent.session.processRequest(req);
+    if (debugEnabled()) status.log(() => logger.info(`  response: finish=${response.finishReason} · ${describeOutput(response.output)}`));
+    return response;
+  };
   const userTurn = (message: string) => Item.userMessage(noThink ? `${message} /no_think` : message);
 
   const request = new Request();
@@ -260,7 +313,7 @@ async function runTurnInner(
     request.setOptions({ toolChoice: "required" });
   }
 
-  let response = await agent.session.processRequest(request);
+  let response = await send(request);
   let degenerateRetries = 0;
 
   for (let iterations = 0; iterations < MAX_TOOL_ITERATIONS; iterations++) {
@@ -276,7 +329,7 @@ async function runTurnInner(
         followUp.addItem(Item.toolResult(call.callId, result));
       }
       status.update(options.statusLabel ?? "Thinking");
-      response = await agent.session.processRequest(followUp);
+      response = await send(followUp);
       continue;
     }
 
@@ -306,7 +359,7 @@ async function runTurnInner(
             : "Your previous answer was unusable (repeated text or noise). Answer again from scratch in plain English: be direct and concise, and do not repeat any sentence."
         )
       );
-      response = await agent.session.processRequest(followUp);
+      response = await send(followUp);
       continue;
     }
 
@@ -327,7 +380,7 @@ async function runTurnInner(
         )
       );
       status.update(options.statusLabel ?? "Thinking");
-      response = await agent.session.processRequest(followUp);
+      response = await send(followUp);
       continue;
     }
 
