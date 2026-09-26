@@ -84,7 +84,7 @@ async function setupFlow(deps: MenuDeps, status: Status): Promise<void> {
 async function connectFlow(deps: MenuDeps, status: Status): Promise<void> {
   const { ui, actions, log } = deps;
   log.info("Create a Personal Access Token at https://dev.azure.com/<your-org>/_usersSettings/tokens");
-  log.info("Scope: Work Items — Read (choose Read & write if you want TraceForge to post comments).");
+  log.info("Scopes: Work Items — Read (Read & write if you want TraceForge to post comments), plus Wiki — Read and Code — Read so answers can use your team wiki.");
   const email = (
     await ui.input("Azure DevOps account email", {
       default: status.email,

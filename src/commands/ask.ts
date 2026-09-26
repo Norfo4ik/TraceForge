@@ -5,12 +5,17 @@ import { ToolRegistry } from "../core/toolRegistry.js";
 import { createRepoTools, gatherRepoOverview, resolveProject } from "../core/repoTools.js";
 import { loadConfig } from "../core/config.js";
 import { inputCharBudget, outputTokenBudget, toolDefinitionChars } from "../core/contextBudget.js";
+import { formatWikiForPrompt } from "../core/adoWiki.js";
+import { logWikiSources, lookupWiki } from "../core/wikiContext.js";
 import { ASK_SYSTEM_PROMPT, NO_REPOSITORY_NOTE } from "../prompts/systemPrompts.js";
 import { logger } from "../utils/logger.js";
 
 export interface AskOptions {
   verbose?: boolean;
 }
+
+/** How much wiki text goes in the prompt when the model's window is unknown. */
+const UNBOUNDED_WIKI_CHARS = 12_000;
 
 const SUMMARY_REQUEST =
   "(Answer with a short summary of the project taken from the overview above: what it is, its main folders and files, and how to build or run it. Do not ask what I want to know.)";
@@ -42,7 +47,11 @@ export async function runAsk(question: string, opts: AskOptions = {}): Promise<v
     logger.warn("No project found here (not a git repository, and this folder has no source files) — I can only answer general questions.");
   }
 
-  // The model is loaded first because its context window decides how much of the project overview fits.
+  // Team documentation first: it's a quick lookup, and a token problem should show before a slow model load.
+  const wikiPages = await lookupWiki(project?.root, question, { verbose: opts.verbose });
+  if (opts.verbose) logWikiSources(wikiPages);
+
+  // The model is loaded next because its context window decides how much of the project overview fits.
   const { model, info, alias } = await ensureModel(configuredModel);
   const asked = clarifyBroadQuestion(question);
 
@@ -55,13 +64,17 @@ export async function runAsk(question: string, opts: AskOptions = {}): Promise<v
     const where = project.kind === "git" ? "repository" : "project folder (it is not a git repository, so there is no commit history)";
     const heading = `Overview of the ${where} the user is in (already gathered for you — use the tools only for details not shown here):\n`;
     const tail = "\n\n---\n";
-    const fixedChars = ASK_SYSTEM_PROMPT.length + toolDefinitionChars(tools.definitions()) + heading.length + tail.length + asked.length + 20;
+    const fixedChars = ASK_SYSTEM_PROMPT.length + toolDefinitionChars(tools.definitions()) + heading.length + tail.length * 2 + asked.length + 20;
     const budget = inputCharBudget(contextLength, outputTokenBudget(contextLength), fixedChars);
-    const overview = gatherRepoOverview(project.root, project.kind, { maxChars: budget }).text;
-    if (opts.verbose) logger.info(`  context window: ${contextLength ?? "unknown"} tokens; overview trimmed to ${overview.length} characters`);
+    // Wiki pages get up to 40% of what the window leaves; the overview takes the rest. Unknown window: no squeeze.
+    const wiki = formatWikiForPrompt(wikiPages, Number.isFinite(budget) ? Math.floor(budget * 0.4) : UNBOUNDED_WIKI_CHARS);
+    const overview = gatherRepoOverview(project.root, project.kind, { maxChars: budget - wiki.length }).text;
+    if (opts.verbose) {
+      logger.info(`  context window: ${contextLength ?? "unknown"} tokens; overview trimmed to ${overview.length} characters, wiki ${wiki.length}`);
+    }
     // A small model asked "what is this project?" tends to answer "I need more context" instead of reaching for
     // a tool, so hand it the overview up front and keep the tools for details that aren't in it.
-    return `${heading}${overview}${tail}`;
+    return `${heading}${overview}${tail}${wiki ? `${wiki}${tail}` : ""}`;
   };
 
   try {

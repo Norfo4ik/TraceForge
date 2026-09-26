@@ -12,14 +12,45 @@ TraceForge is a terminal app that investigates Azure DevOps work items against y
     █   █   █ █   █  ████ █████ █      ███  █   █  ████ █████
 ```
 
-## Quick start
+## Install
+
+One command, in PowerShell (Windows 10/11; Copilot+ PC recommended):
+
+```powershell
+irm https://raw.githubusercontent.com/Norfo4ik/TraceForge/master/install.ps1 | iex
+```
+
+It installs **Node.js** and **Git** with winget if they are missing, installs the latest TraceForge release, puts `traceforge` on your PATH, and offers to start it. The AI model and the NPU/GPU runtimes are not part of the install: TraceForge offers to download them on first start (with the size shown) so nothing large happens behind your back.
+
+Options (run the script as a scriptblock to pass them):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Norfo4ik/TraceForge/master/install.ps1))) -NoLaunch -SkipGit
+```
+
+| Option | Effect |
+|---|---|
+| `-NoLaunch` | Don't offer to start TraceForge at the end (or set `TRACEFORGE_NO_LAUNCH=1`). |
+| `-SkipGit` | Don't install Git if it's missing (plain-folder mode only, no commit history). |
+| `-NoPathUpdate` | Don't add npm's global folder to your PATH. |
+| `-Source <tgz-or-url>` | Install that tarball instead of the latest release (or set `TRACEFORGE_SOURCE`). |
+
+Update later with `traceforge update`. Prefer to see the script first? It is [install.ps1](install.ps1) — about 150 lines.
+
+### Building from source
 
 ```bash
 npm install
 npm run build
-npm link            # installs the `traceforge` command
+npm link            # installs the `traceforge` command from this checkout
 traceforge          # opens the interactive menu
 ```
+
+### Publishing a release (maintainers)
+
+Bump `version` in package.json, commit, then tag and push `v<version>`. The **Release** workflow tests, packs `traceforge.tgz` and attaches it, with `install.ps1`, to a GitHub release — which is what the install command and `traceforge update` download.
+
+## Using it
 
 Run `traceforge` with no arguments in a git repository to get the menu: the screen clears, the logo and a status panel (repository, Azure DevOps sign-in, which device the AI will use) appear, and you pick with the arrow keys:
 
@@ -27,7 +58,7 @@ Run `traceforge` with no arguments in a git repository to get the menu: the scre
 |---|---|
 | Investigate a work item | Fetches the work item from Azure DevOps, searches the repo for related code, and writes a report. Optionally offers to post it back as a comment (always asks first). |
 | Generate repository docs | Writes an onboarding overview from the repo's real files, manifests and history. |
-| Ask about this code | Free-form question; the model can list, read and search files, and read git history when the folder is a git repository. Works in a plain project folder too (no `git init` needed) — it just has no history to look at. Outside any project it says so instead of guessing. |
+| Ask about this code | Free-form question; answers also draw on your team's **Azure DevOps Wiki** when it's set up (see below). The model can list, read and search files, and read git history when the folder is a git repository. Works in a plain project folder too (no `git init` needed) — it just has no history to look at. Outside any project it says so instead of guessing. |
 | Set up this repository | Chooses the Azure DevOps organization and project (accepts a pasted `https://dev.azure.com/<org>` URL). |
 | Connect Azure DevOps | Stores your email and Personal Access Token once, for every repository. |
 | Check system health | Verifies tools, on-device AI and the Azure DevOps connection. |
@@ -39,9 +70,8 @@ If you renamed from the earlier prototype: run `npm uninstall -g local-devops-co
 
 ## Requirements
 
-- Node.js 20+
-- git
-- An Azure DevOps organization and a [Personal Access Token](https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate) (Work Items: Read; Read & write only if you want TraceForge to post comments)
+- Node.js 20+ and git (the installer adds them if missing)
+- An Azure DevOps organization and a [Personal Access Token](https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate) with **Work Items: Read**, **Wiki: Read** and **Code: Read** (the last two are for wiki search; Work Items: Read & write only if you want TraceForge to post comments)
 
 ### Credentials
 
@@ -58,6 +88,8 @@ Everything the menu does is also a command, for scripts, CI and VS Code tasks. G
 | `traceforge docs` | (Re)generates `docs/GENERATED_OVERVIEW.md`. |
 | `traceforge investigate <id> [--post-comment [--yes]]` | Writes a report to `.traceforge/investigations/<id>.md`. `--post-comment` previews it and asks before posting it to the work item as an AI-labelled comment; without a terminal it refuses unless `--yes` is given. |
 | `traceforge ask "<question>"` | Free-form Q&A with the repo tools. Works without Azure DevOps configured. |
+| `traceforge wiki "<query>"` | Shows which Azure DevOps wiki pages TraceForge would give the model for that query — no AI involved. The way to check what Ask/Investigate see in the wiki. |
+| `traceforge update` | Reinstalls TraceForge from the latest release. |
 | `traceforge mcp [--repo <path>]` | Serves the read-only repo tools as an MCP server over stdio, for any MCP client (VS Code / GitHub Copilot, Claude, …). |
 
 Every generation ends with a line such as `Inference ran on-device on NPU (QNNExecutionProvider) in 41.3s — no prompt or code was sent to a cloud AI service.` Add `-v` to `ask`, `docs` or `investigate` for details.
@@ -65,6 +97,16 @@ Every generation ends with a line such as `Inference ran on-device on NPU (QNNEx
 ### In VS Code
 
 `traceforge init --vscode` adds *Terminal ▸ Run Task ▸ "TraceForge: …"* entries (investigate a work item — with or without posting the comment —, generate docs, doctor) and a `.vscode/mcp.json` that registers `traceforge mcp`, so Copilot agent mode can read and search the repo through the same tools.
+
+## Azure DevOps Wiki
+
+When a repository is set up for Azure DevOps and you're signed in, **Ask** and **Investigate** also look in the project's wiki: they search it for the question (or the work item's text), read the best-matching pages, and give the model the relevant parts — so answers about setup, deployment, conventions and troubleshooting come from your team's own runbooks, with the page path cited. The pages are read through the official Azure DevOps MCP server (read-only) and only ever reach the local model.
+
+- **Token scope:** the Personal Access Token needs **Wiki: Read** (and **Code: Read** for full-text wiki search). Without it TraceForge says so in one line and carries on without the wiki. `traceforge doctor --check-ado` reports wiki access.
+- **See what it finds:** `traceforge wiki "how do we deploy to staging"` prints the pages, no AI involved.
+- **Fresh wikis:** full-text search can lag behind new pages; TraceForge falls back to matching page titles.
+- **Turn it off:** set `"wiki": false` in `.traceforge/config.json`, or `TRACEFORGE_WIKI=off`.
+- **Safety:** wiki text is treated as reference material, never as instructions, and the model has no Azure DevOps tools that could act on it.
 
 ## How it works
 

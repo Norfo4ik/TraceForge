@@ -9,6 +9,8 @@ import { runInit } from "./commands/init.js";
 import { runDocs } from "./commands/docs.js";
 import { runInvestigate } from "./commands/investigate.js";
 import { runMcpServer } from "./commands/mcp.js";
+import { runWiki } from "./commands/wiki.js";
+import { runUpdate } from "./commands/update.js";
 import { renderLogo } from "./ui/logo.js";
 import { runInteractive } from "./ui/menu.js";
 import { logger } from "./utils/logger.js";
@@ -73,6 +75,22 @@ program
   .option("-y, --yes", "with --post-comment: post without asking (needed when not run in a terminal)")
   .action(async (workItemId: string, options: { verbose?: boolean; postComment?: boolean; yes?: boolean }) => {
     await runInvestigate(workItemId, options);
+  });
+
+program
+  .command("wiki <query>")
+  .description("Show the Azure DevOps wiki pages TraceForge would use for a question (no AI involved)")
+  .option("-v, --verbose", "show the Azure DevOps MCP server's own messages")
+  .action(async (query: string, options: { verbose?: boolean }) => {
+    await runWiki(query, options);
+  });
+
+program
+  .command("update")
+  .description("Update TraceForge to the latest release")
+  .option("--source <url-or-file>", "install from this tarball or URL instead of the latest release")
+  .action(async (options: { source?: string }) => {
+    await runUpdate(options);
   });
 
 program
