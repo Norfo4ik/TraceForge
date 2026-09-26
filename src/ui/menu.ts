@@ -4,7 +4,7 @@ import { runDocs } from "../commands/docs.js";
 import { runDoctor, type DoctorOptions } from "../commands/doctor.js";
 import { runInit, type InitOptions } from "../commands/init.js";
 import { runInvestigate, type InvestigateOptions } from "../commands/investigate.js";
-import { saveUserCredentials } from "../core/config.js";
+import { saveUserCredentials, saveUserSettings } from "../core/config.js";
 import { keepFoundryLocalAlive, shutdownFoundryLocal } from "../core/foundryModel.js";
 import { VERSION } from "../version.js";
 import { logger } from "../utils/logger.js";
@@ -27,6 +27,8 @@ export interface MenuDeps {
     init: (opts: InitOptions) => Promise<void>;
     doctor: (opts: DoctorOptions) => Promise<void>;
     saveCredentials: (email: string, pat: string) => string;
+    /** Remembers the user's yes/no about enabling the NPU/GPU. */
+    setAccelerators: (enabled: boolean) => void;
   };
   log: Pick<typeof logger, "ok" | "info" | "warn" | "error">;
 }
@@ -145,13 +147,45 @@ async function runChoice(choice: Exclude<MenuChoice, "exit">, deps: MenuDeps, st
   }
 }
 
+/**
+ * First launch on a machine with an NPU that isn't enabled yet: ask once whether to enable it, and remember the
+ * answer (accelerator registration only lasts for one process, so a "yes" is what makes it happen at every start).
+ */
+async function offerAcceleration(deps: MenuDeps): Promise<void> {
+  try {
+    const yes = await deps.ui.confirm(
+      "An NPU was detected on this machine. Download its runtime once and use it automatically from now on? (a few hundred MB)",
+      true
+    );
+    if (!yes) {
+      deps.actions.setAccelerators(false);
+      deps.log.info('OK — staying on the CPU. Choose "Enable NPU / GPU acceleration" any time to change this.');
+    } else {
+      await deps.actions.doctor({ accelerate: true });
+    }
+    await deps.ui.input("↵  Press Enter to continue");
+  } catch (err) {
+    if (err instanceof BackToMenu) return; // Esc: not now — ask again next time
+    if (isUserCancel(err)) throw err;
+    deps.log.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
 /** The menu loop. Returns when the user picks Exit or presses Ctrl+C. */
 export async function runMenu(deps: MenuDeps): Promise<void> {
+  let offered = false;
   for (;;) {
     let status: Status;
     try {
       status = await deps.status();
       deps.draw(status);
+
+      if (!offered && status.npu === "available" && status.acceleratorDecision === undefined) {
+        offered = true;
+        await offerAcceleration(deps);
+        continue; // redraw with the new state
+      }
+
       const choice = await deps.ui.select("What would you like to do?", menuChoices(status));
       if (choice === "exit") return;
 
@@ -205,6 +239,7 @@ export async function runInteractive(): Promise<void> {
           process.env.ADO_PAT = pat;
           return path;
         },
+        setAccelerators: (enabled) => saveUserSettings({ accelerators: enabled }),
       },
       log: logger,
     });

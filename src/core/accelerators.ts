@@ -51,8 +51,14 @@ export function isChatModelAlias(alias: string): boolean {
   return !/whisper|parakeet|nemotron|embedding|speech|asr|-vl-|rerank/i.test(alias);
 }
 
-// Best first, for the writing tasks TraceForge does. Anything not listed is ranked by size below.
-const PREFERRED_MODELS = ["qwen3-8b", "qwen3-4b", "qwen2.5-7b", "qwen2.5-coder-7b", "phi-4-mini", "qwen2.5-3b", "phi-3.5-mini", "qwen2.5-1.5b"];
+// Best first, for the writing tasks TraceForge does. phi-4-mini is ahead of the 7B models because on an NPU a
+// ~4B model is far more responsive, and it follows instructions and calls tools well. Unlisted models are ranked by size.
+const PREFERRED_MODELS = ["qwen3-8b", "qwen3-4b", "phi-4-mini", "qwen2.5-7b", "qwen2.5-coder-7b", "qwen2.5-3b", "phi-3.5-mini", "qwen2.5-1.5b"];
+
+/** Execution providers that aren't registered yet — the ones to download and register at startup. */
+export function unregisteredProviders(eps: ReadonlyArray<{ name: string; isRegistered: boolean }>): string[] {
+  return eps.filter((ep) => !ep.isRegistered).map((ep) => ep.name);
+}
 
 function modelScore(v: ModelVariant): number {
   const listed = PREFERRED_MODELS.indexOf(v.alias);
@@ -88,9 +94,10 @@ export interface DefaultModelChoice {
 }
 
 /**
- * Chooses the model to use when the user hasn't picked one. Keeps `preferredAlias` if it has an NPU/GPU build;
- * otherwise, if the machine has usable accelerators, switches to the best model that does (NPU before GPU) so the
- * hardware isn't left idle. `force` restricts the device; forcing CPU never switches models.
+ * Chooses the model to use when the user hasn't picked one. Device first: use the best accelerator that has any
+ * usable model (NPU, then GPU). Within that device keep `preferredAlias` if it has a build there, otherwise take the
+ * best model that does — so a default with only a GPU build doesn't keep the machine off an available NPU.
+ * `force` restricts the device; forcing CPU never switches models.
  */
 export function pickDefaultModel(
   variants: ModelVariant[],
@@ -101,13 +108,14 @@ export function pickDefaultModel(
   if (force === "CPU") return { alias: preferredAlias, device: "CPU" };
 
   const accelerated = acceleratedVariants(variants, registeredEps).filter((v) => !force || v.deviceType === force);
-  const byDevice = (a: ModelVariant, b: ModelVariant) => (RANK[b.deviceType] ?? 0) - (RANK[a.deviceType] ?? 0);
-
-  const own = accelerated.filter((v) => v.alias === preferredAlias).sort(byDevice)[0];
-  if (own) return { alias: preferredAlias, device: own.deviceType as DeviceKind };
   if (accelerated.length === 0) return { alias: preferredAlias, device: "CPU" };
 
-  const score = (v: ModelVariant) => (RANK[v.deviceType] ?? 0) * 1000 + modelScore(v);
-  const best = [...accelerated].sort((a, b) => score(b) - score(a))[0];
+  const bestRank = Math.max(...accelerated.map((v) => RANK[v.deviceType] ?? 0));
+  const onBestDevice = accelerated.filter((v) => (RANK[v.deviceType] ?? 0) === bestRank);
+
+  const own = onBestDevice.find((v) => v.alias === preferredAlias);
+  if (own) return { alias: preferredAlias, device: own.deviceType as DeviceKind };
+
+  const best = [...onBestDevice].sort((a, b) => modelScore(b) - modelScore(a))[0];
   return { alias: best.alias, device: best.deviceType as DeviceKind, switchedFrom: preferredAlias };
 }

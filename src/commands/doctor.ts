@@ -2,8 +2,15 @@ import { execFileSync, execSync } from "node:child_process";
 import ora from "ora";
 import { isNpuProvider } from "../core/accelerators.js";
 import { connectAdoMcp } from "../core/adoMcpClient.js";
-import { loadConfig } from "../core/config.js";
-import { acceleratedModels, getManager, planModel, registerAccelerators, shutdownFoundryLocal } from "../core/foundryModel.js";
+import { loadConfig, saveUserSettings } from "../core/config.js";
+import {
+  acceleratedModels,
+  getManager,
+  planModel,
+  prepareAccelerators,
+  registerAccelerators,
+  shutdownFoundryLocal,
+} from "../core/foundryModel.js";
 import { getRepoRoot } from "../core/repoTools.js";
 import { logger } from "../utils/logger.js";
 
@@ -33,9 +40,11 @@ async function checkAccelerators(accelerate: boolean): Promise<void> {
   const manager = getManager();
   logger.ok("Foundry Local runtime loaded");
 
+  await prepareAccelerators(); // no-op unless the user opted in earlier; registration doesn't persist across runs
   let eps = manager.discoverEps();
   if (accelerate) {
     const pending = eps.filter((ep) => !ep.isRegistered);
+    let registrationFailed = false;
     if (pending.length === 0) {
       logger.info("Every available execution provider is already registered.");
     } else {
@@ -50,9 +59,15 @@ async function checkAccelerators(accelerate: boolean): Promise<void> {
           spinner.succeed(`Registered: ${result.registered.join(", ") || "nothing new"}`);
         }
       } catch (err) {
+        registrationFailed = true;
         spinner.fail(`Could not register execution providers: ${(err as Error).message}`);
       }
       eps = manager.discoverEps();
+    }
+    if (!registrationFailed) {
+      // Registration only lasts for this process, so remember the opt-in and repeat it at every start.
+      saveUserSettings({ accelerators: true });
+      logger.ok("Saved: TraceForge will enable these automatically each time it starts (set TRACEFORGE_ACCELERATE=off to skip).");
     }
   }
 

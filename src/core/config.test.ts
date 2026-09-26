@@ -2,7 +2,26 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { saveUserCredentials } from "./config.js";
+import { loadUserSettings, saveUserCredentials, saveUserSettings } from "./config.js";
+
+describe("user settings", () => {
+  it("reports no decision when there is no file, and remembers yes/no once saved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
+    expect(loadUserSettings(dir)).toEqual({});
+    saveUserSettings({ accelerators: true }, dir);
+    expect(loadUserSettings(dir)).toEqual({ accelerators: true });
+    saveUserSettings({ accelerators: false }, dir);
+    expect(loadUserSettings(dir)).toEqual({ accelerators: false });
+  });
+
+  it("treats a corrupt or wrongly-typed file as no decision instead of failing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
+    writeFileSync(join(dir, "settings.json"), "{ not json");
+    expect(loadUserSettings(dir)).toEqual({});
+    writeFileSync(join(dir, "settings.json"), '{"accelerators":"yes"}');
+    expect(loadUserSettings(dir)).toEqual({});
+  });
+});
 
 describe("saveUserCredentials", () => {
   it("writes the two ADO_* lines and keeps unrelated settings", () => {

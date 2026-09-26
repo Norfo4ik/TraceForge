@@ -22,7 +22,7 @@ describe("renderStatus", () => {
     const onNpu = renderStatus({ ...base, model: "phi-3.5-mini", device: "NPU (OpenVINOExecutionProvider)", npu: "registered", switchedFrom: "qwen3-4b" }, false);
     expect(onNpu).toContain("phi-3.5-mini on NPU (OpenVINOExecutionProvider)");
     expect(onNpu).toContain("running on the NPU");
-    expect(onNpu).toContain("auto-selected: qwen3-4b has no NPU/GPU build here");
+    expect(onNpu).toContain("auto-selected: qwen3-4b has no NPU build here");
 
     const unused = renderStatus({ ...base, device: "CPU (CPUExecutionProvider)", npu: "registered" }, false);
     expect(unused).toContain("NPU ready, but this model isn't using it");

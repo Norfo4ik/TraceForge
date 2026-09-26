@@ -54,6 +54,30 @@ export function saveUserCredentials(email: string, pat: string, dir: string = us
   return path;
 }
 
+export interface UserSettings {
+  /**
+   * The user's decision about NPU/GPU acceleration: true = register the accelerator runtimes at every start
+   * (registration lasts only for the process that did it), false = declined, undefined = never asked.
+   */
+  accelerators?: boolean;
+}
+
+/** Per-user settings (~/.traceforge/settings.json). A missing or unreadable file just means "no decisions yet". */
+export function loadUserSettings(dir: string = userConfigDir()): UserSettings {
+  try {
+    const raw = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
+    return typeof raw?.accelerators === "boolean" ? { accelerators: raw.accelerators } : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveUserSettings(patch: UserSettings, dir: string = userConfigDir()): void {
+  mkdirSync(dir, { recursive: true });
+  const merged = { ...loadUserSettings(dir), ...patch };
+  writeFileSync(join(dir, "settings.json"), JSON.stringify(merged, null, 2) + "\n", "utf-8");
+}
+
 export function hasAdoCredentials(): boolean {
   return Boolean(process.env.ADO_EMAIL && process.env.ADO_PAT);
 }

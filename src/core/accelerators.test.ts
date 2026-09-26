@@ -6,6 +6,7 @@ import {
   isNpuProvider,
   parseDevicePreference,
   pickDefaultModel,
+  unregisteredProviders,
   type ModelVariant,
   type VariantInfo,
 } from "./accelerators.js";
@@ -64,6 +65,19 @@ describe("pickDefaultModel", () => {
     expect(choice).toEqual({ alias: "phi-3.5-mini", device: "NPU", switchedFrom: "qwen3-4b" });
   });
 
+  it("goes NPU-first even when the default model only has a GPU build (the real catalog on an Intel Core Ultra)", () => {
+    const real: ModelVariant[] = [
+      mv("qwen3-4b", "GPU", WEBGPU, { fileSizeMb: 2900, supportsToolCalling: true }),
+      mv("phi-4-mini", "NPU", OV, { fileSizeMb: 2200, supportsToolCalling: true }),
+      mv("phi-4-mini", "GPU", WEBGPU, { fileSizeMb: 2200, supportsToolCalling: true }),
+      mv("qwen2.5-7b", "NPU", OV, { fileSizeMb: 4300, supportsToolCalling: true }),
+      mv("deepseek-r1-7b", "NPU", OV, { fileSizeMb: 4300 }),
+    ];
+    expect(pickDefaultModel(real, new Set([OV, WEBGPU]), "qwen3-4b")).toEqual({ alias: "phi-4-mini", device: "NPU", switchedFrom: "qwen3-4b" });
+    // Asking for the GPU explicitly keeps the usual model, which is what a CPU/GPU/NPU comparison needs.
+    expect(pickDefaultModel(real, new Set([OV, WEBGPU]), "qwen3-4b", "GPU")).toEqual({ alias: "qwen3-4b", device: "GPU" });
+  });
+
   it("prefers the NPU over the GPU, but uses the GPU when that is all that is registered", () => {
     expect(pickDefaultModel(catalog, new Set([OV, WEBGPU]), "qwen3-4b").device).toBe("NPU");
     expect(pickDefaultModel(catalog, new Set([WEBGPU]), "qwen3-4b")).toEqual({ alias: "phi-3.5-mini", device: "GPU", switchedFrom: "qwen3-4b" });
@@ -86,6 +100,17 @@ describe("pickDefaultModel", () => {
   it("ranks unlisted models by size", () => {
     const unlisted = [mv("small-x", "NPU", OV, { fileSizeMb: 900 }), mv("big-y", "NPU", OV, { fileSizeMb: 5000 })];
     expect(pickDefaultModel(unlisted, new Set([OV]), "qwen3-4b").alias).toBe("big-y");
+  });
+});
+
+describe("unregisteredProviders", () => {
+  it("lists only the providers that still need registering", () => {
+    const eps = [
+      { name: "OpenVINOExecutionProvider", isRegistered: false },
+      { name: "WebGpuExecutionProvider", isRegistered: true },
+    ];
+    expect(unregisteredProviders(eps)).toEqual(["OpenVINOExecutionProvider"]);
+    expect(unregisteredProviders([])).toEqual([]);
   });
 });
 

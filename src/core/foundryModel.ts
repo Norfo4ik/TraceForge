@@ -5,8 +5,10 @@ import {
   chooseVariant,
   parseDevicePreference,
   pickDefaultModel,
+  unregisteredProviders,
   type ModelVariant,
 } from "./accelerators.js";
+import { loadUserSettings } from "./config.js";
 import { logger } from "../utils/logger.js";
 
 // Namespaces Foundry Local's data on disk. Deliberately NOT renamed with the product: changing it may move the
@@ -95,15 +97,42 @@ export async function acceleratedModels(): Promise<ModelVariant[]> {
 
 /**
  * Downloads and registers every execution provider this machine can use (NPU / GPU runtimes). Opt-in via
- * `doctor --accelerate` because the packages are large; once registered they persist, and model selection
- * then uses them automatically.
+ * `doctor --accelerate` because the packages are large. NOTE: the download is cached on disk, but registration
+ * only lasts for the current process — so {@link prepareAccelerators} repeats it at every start once the user
+ * has opted in.
  */
 export async function registerAccelerators(
   onProgress: (provider: string, percent: number) => void
 ): Promise<{ success: boolean; registered: string[]; failed: string[] }> {
   const result = await getManager().downloadAndRegisterEps(onProgress);
   variantCache = undefined;
+  prepared = Promise.resolve();
   return { success: result.success, registered: [...result.registeredEps], failed: [...result.failedEps] };
+}
+
+let prepared: Promise<void> | undefined;
+
+/**
+ * Registers the NPU/GPU runtimes for this process if the user has opted in. Registration doesn't survive a restart
+ * (found on real hardware: `doctor --accelerate` reported success and the next command started unregistered), so
+ * without this every launch would silently run on the CPU. Quick when the packages are already downloaded; if it
+ * fails (offline, driver) the app carries on with whatever is registered. Safe to call repeatedly.
+ */
+export function prepareAccelerators(): Promise<void> {
+  prepared ??= (async () => {
+    if (process.env.TRACEFORGE_ACCELERATE?.trim().toLowerCase() === "off") return;
+    if (loadUserSettings().accelerators !== true) return;
+    const pending = unregisteredProviders(getManager().discoverEps());
+    if (pending.length === 0) return;
+    try {
+      const result = await getManager().downloadAndRegisterEps(pending);
+      variantCache = undefined;
+      if (result.failedEps.length) logger.warn(`Could not enable ${result.failedEps.join(", ")} — continuing without it.`);
+    } catch (err) {
+      logger.warn(`Could not enable NPU/GPU acceleration (${err instanceof Error ? err.message : String(err)}) — continuing on the CPU.`);
+    }
+  })();
+  return prepared;
 }
 
 interface ModelTarget {
@@ -117,6 +146,7 @@ interface ModelTarget {
  * for, in which case the best model that does is chosen so the hardware doesn't sit idle.
  */
 async function resolveTarget(alias?: string): Promise<ModelTarget> {
+  await prepareAccelerators();
   const explicit = explicitAlias(alias);
   if (explicit) return { alias: explicit };
   const force = parseDevicePreference(process.env.TRACEFORGE_DEVICE);
@@ -193,7 +223,7 @@ export async function ensureModel(alias?: string): Promise<LoadedModel> {
 
   if (target.switchedFrom) {
     logger.info(
-      `${target.switchedFrom} has no ${String(model.info.runtime?.deviceType ?? model.info.deviceType)} build on this machine, so using ${name} to run on the accelerator. ` +
+      `${target.switchedFrom} has no ${String(model.info.runtime?.deviceType ?? model.info.deviceType)} build on this machine, so using ${name} to run on it. ` +
         `(Set TRACEFORGE_MODEL to choose a model yourself, or TRACEFORGE_DEVICE=cpu to stay on the CPU.)`
     );
   }

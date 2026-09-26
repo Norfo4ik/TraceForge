@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { basename } from "node:path";
 import chalk from "chalk";
 import { isNpuProvider } from "../core/accelerators.js";
-import { hasAdoCredentials, loadConfig, type TraceForgeConfig } from "../core/config.js";
-import { getManager, planModel, resolveModelAlias } from "../core/foundryModel.js";
+import { hasAdoCredentials, loadConfig, loadUserSettings, type TraceForgeConfig } from "../core/config.js";
+import { getManager, planModel, prepareAccelerators, resolveModelAlias } from "../core/foundryModel.js";
 import { getRepoRoot } from "../core/repoTools.js";
 
 export type NpuState = "registered" | "available" | "none" | "unknown";
@@ -19,6 +19,8 @@ export interface Status {
   device?: string;
   /** Set when the usual default model was swapped for one that can use the NPU/GPU. */
   switchedFrom?: string;
+  /** The user's saved answer to "use the NPU/GPU?": undefined until they've been asked. */
+  acceleratorDecision?: boolean;
   npu: NpuState;
 }
 
@@ -33,7 +35,13 @@ function currentBranch(repoRoot: string): string | undefined {
 
 /** Gathers what the header shows. Never throws: anything unknown is simply left out. */
 export async function collectStatus(): Promise<Status> {
-  const status: Status = { credentials: hasAdoCredentials(), email: process.env.ADO_EMAIL, model: resolveModelAlias(), npu: "unknown" };
+  const status: Status = {
+    credentials: hasAdoCredentials(),
+    email: process.env.ADO_EMAIL,
+    model: resolveModelAlias(),
+    npu: "unknown",
+    acceleratorDecision: loadUserSettings().accelerators,
+  };
 
   try {
     status.repoRoot = getRepoRoot();
@@ -45,6 +53,7 @@ export async function collectStatus(): Promise<Status> {
   }
 
   try {
+    await prepareAccelerators(); // registration is per-process, so it must happen before we look at the state
     const eps = getManager().discoverEps().filter((ep) => isNpuProvider(ep.name));
     status.npu = eps.some((e) => e.isRegistered) ? "registered" : eps.length ? "available" : "none";
     const plan = await planModel(status.config?.model);
@@ -85,7 +94,8 @@ export function renderStatus(status: Status, color = true): string {
     none: c.label("no NPU on this machine"),
     unknown: c.label("device unknown"),
   };
-  const switched = status.switchedFrom ? `\n${" ".repeat(17)}${c.label(`auto-selected: ${status.switchedFrom} has no NPU/GPU build here`)}` : "";
+  const chosenDevice = status.device?.split(" ")[0] ?? "NPU/GPU";
+  const switched = status.switchedFrom ? `\n${" ".repeat(17)}${c.label(`auto-selected: ${status.switchedFrom} has no ${chosenDevice} build here`)}` : "";
   const ai = `${c.accent(status.model)} ${c.label("on")} ${status.device ?? c.label("…")}  ${c.label("·")}  ${npuText[status.npu]}${switched}`;
 
   return [row("Repository", repo), row("Azure DevOps", ado), row("On-device AI", ai)].join("\n");

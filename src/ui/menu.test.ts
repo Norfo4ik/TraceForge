@@ -48,6 +48,7 @@ function harness(answers: unknown[], statuses: Status[] = [configured]) {
         calls.push(["saveCredentials", email, pat]);
         return "/home/me/.traceforge/.env";
       },
+      setAccelerators: (enabled) => void calls.push(["setAccelerators", enabled]),
     },
     log: {
       ok: (m) => void logs.push(`ok: ${m}`),
@@ -159,6 +160,42 @@ describe("runMenu", () => {
     const accepted = harness(["accelerate", true, "", "exit"]);
     await runMenu(accepted.deps);
     expect(accepted.calls).toEqual([["doctor", { accelerate: true }]]);
+  });
+});
+
+describe("first-launch NPU offer", () => {
+  const npuFound: Status = { ...configured, npu: "available", acceleratorDecision: undefined };
+  const npuOn: Status = { ...configured, npu: "registered", acceleratorDecision: true };
+
+  it("enables acceleration when the user says yes, then shows the updated state", async () => {
+    const h = harness([true, "", "exit"], [npuFound, npuOn]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([["doctor", { accelerate: true }]]);
+    expect(h.remaining()).toBe(0);
+  });
+
+  it("remembers a no, and asks only once per session even if the state stays 'undecided'", async () => {
+    const h = harness([false, "", "exit"], [npuFound]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([["setAccelerators", false]]);
+    expect(h.logs.some((l) => l.includes("staying on the CPU"))).toBe(true);
+  });
+
+  it("Esc means 'not now': nothing is saved or downloaded", async () => {
+    const h = harness([new BackToMenu(), "exit"], [npuFound]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([]);
+    expect(h.logs).toEqual([]);
+  });
+
+  it.each([
+    ["already decided", { ...npuFound, acceleratorDecision: false }],
+    ["already enabled", npuOn],
+    ["no NPU on this machine", { ...npuFound, npu: "none" as const }],
+  ])("does not ask when %s", async (_name, status) => {
+    const h = harness(["exit"], [status]);
+    await runMenu(h.deps);
+    expect(h.calls).toEqual([]);
   });
 });
 
