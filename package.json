@@ -10,7 +10,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsup src/cli.ts --format esm --target node20 --clean",
+    "build": "tsup",
     "dev": "tsx src/cli.ts",
     "test": "vitest run"
   },

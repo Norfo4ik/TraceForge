@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ASK_SYSTEM_PROMPT } from "../prompts/systemPrompts.js";
+import { estimateTokens, inputCharBudget, outputTokenBudget, toolDefinitionChars } from "./contextBudget.js";
 import { createRepoTools, gatherRepoOverview, getRepoRoot, resolveProject } from "./repoTools.js";
 
 function plainFolder(files: Record<string, string>): string {
@@ -94,5 +96,44 @@ describe("repoTools", () => {
     const pattern = ["definitely-not", "-a-real-symbol-xyz123"].join("");
     const result = JSON.parse(await grepRepo.execute({ pattern }));
     expect(result.count).toBe(0);
+  });
+});
+
+describe("overview fits the model's context window (a big repo on a 4,224-token NPU model)", () => {
+  // A large project: many files with long paths, a long README, a big manifest and entry point.
+  const files: Record<string, string> = {
+    "README.md": "# Big project\n" + "This service does many things and has a very long description. ".repeat(200),
+    "package.json": JSON.stringify({ name: "big", scripts: Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`script-${i}`, `node tools/task-${i}.js --flag`])) }, null, 2),
+    "src/index.js": "// entry\n" + "console.log('start');\n".repeat(300),
+  };
+  for (let i = 0; i < 250; i++) files[`src/modules/feature-${i}/handlers/request-handler-${i}.js`] = "x";
+  const root = plainFolder(files);
+
+  it("is large by default, and shrinks to any budget it is given without dropping the essentials", () => {
+    const full = gatherRepoOverview(root, "folder").text;
+    expect(full.length).toBeGreaterThan(9_000);
+
+    for (const budget of [6000, 3000, 1500, 600]) {
+      const text = gatherRepoOverview(root, "folder", { maxChars: budget }).text;
+      expect(text.length).toBeLessThanOrEqual(budget);
+      expect(text).toContain("Project files (");
+    }
+    expect(gatherRepoOverview(root, "folder", { maxChars: 3000 }).text).toContain("--- README.md ---");
+    expect(gatherRepoOverview(root, "folder", { maxChars: 3000 }).text).toContain("first ");
+  });
+
+  it("keeps the whole Ask prompt plus the answer inside 4,224 tokens (the reported failure needed 5,415)", () => {
+    const window = 4224;
+    const tools = createRepoTools(root, "folder");
+    const question = "What can you tell about this repo?";
+    const fixed = ASK_SYSTEM_PROMPT.length + toolDefinitionChars(tools) + question.length + 300;
+    const out = outputTokenBudget(window);
+    const overview = gatherRepoOverview(root, "folder", { maxChars: inputCharBudget(window, out, fixed) }).text;
+
+    const promptChars = ASK_SYSTEM_PROMPT.length + toolDefinitionChars(tools) + overview.length + question.length + 300;
+    expect(estimateTokens("x".repeat(promptChars)) + out).toBeLessThanOrEqual(window);
+    // Without budgeting, the same prompt is far over the window — that was the bug.
+    const unbudgeted = ASK_SYSTEM_PROMPT.length + toolDefinitionChars(tools) + gatherRepoOverview(root, "folder").text.length + question.length;
+    expect(estimateTokens("x".repeat(unbudgeted)) + 1200).toBeGreaterThan(window);
   });
 });

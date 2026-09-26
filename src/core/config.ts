@@ -66,6 +66,11 @@ export interface UserSettings {
    * acceleration" clears the list so a fixed driver can be tried.
    */
   blockedBuilds?: string[];
+  /**
+   * Context windows (in tokens) learned from the runtime's own "exceeds the model's maximum context length of N tokens"
+   * error, by model alias. Used when the catalog doesn't report a model's window, so prompts are sized to it up front.
+   */
+  contextLimits?: Record<string, number>;
 }
 
 /** Per-user settings (~/.traceforge/settings.json). A missing or unreadable file just means "no decisions yet". */
@@ -75,6 +80,10 @@ export function loadUserSettings(dir: string = userConfigDir()): UserSettings {
     const settings: UserSettings = {};
     if (typeof raw?.accelerators === "boolean") settings.accelerators = raw.accelerators;
     if (Array.isArray(raw?.blockedBuilds)) settings.blockedBuilds = raw.blockedBuilds.filter((b: unknown) => typeof b === "string");
+    if (raw?.contextLimits && typeof raw.contextLimits === "object" && !Array.isArray(raw.contextLimits)) {
+      const limits = Object.entries(raw.contextLimits).filter(([, v]) => typeof v === "number" && Number.isFinite(v) && v > 0);
+      if (limits.length > 0) settings.contextLimits = Object.fromEntries(limits) as Record<string, number>;
+    }
     return settings;
   } catch {
     return {};
@@ -85,6 +94,15 @@ export function saveUserSettings(patch: UserSettings, dir: string = userConfigDi
   mkdirSync(dir, { recursive: true });
   const merged = { ...loadUserSettings(dir), ...patch };
   writeFileSync(join(dir, "settings.json"), JSON.stringify(merged, null, 2) + "\n", "utf-8");
+}
+
+export function getContextLimit(alias: string, dir: string = userConfigDir()): number | undefined {
+  return loadUserSettings(dir).contextLimits?.[alias];
+}
+
+export function setContextLimit(alias: string, limit: number, dir: string = userConfigDir()): void {
+  const current = loadUserSettings(dir).contextLimits ?? {};
+  if (current[alias] !== limit) saveUserSettings({ contextLimits: { ...current, [alias]: limit } }, dir);
 }
 
 export function hasAdoCredentials(): boolean {

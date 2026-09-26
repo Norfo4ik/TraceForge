@@ -1,8 +1,10 @@
-import { ensureModel, logOnDeviceSummary, shutdownFoundryLocal } from "../core/foundryModel.js";
+import { contextWindow, ensureModel, logOnDeviceSummary, rememberContextWindow, shutdownFoundryLocal } from "../core/foundryModel.js";
+import { runWithContextRetry } from "../core/contextRetry.js";
 import { createSession, runTurn } from "../core/agentLoop.js";
 import { ToolRegistry } from "../core/toolRegistry.js";
 import { createRepoTools, gatherRepoOverview, resolveProject } from "../core/repoTools.js";
 import { loadConfig } from "../core/config.js";
+import { inputCharBudget, outputTokenBudget, toolDefinitionChars } from "../core/contextBudget.js";
 import { ASK_SYSTEM_PROMPT, NO_REPOSITORY_NOTE } from "../prompts/systemPrompts.js";
 import { logger } from "../utils/logger.js";
 
@@ -30,33 +32,55 @@ export function clarifyBroadQuestion(question: string): string {
 
 export async function runAsk(question: string, opts: AskOptions = {}): Promise<void> {
   const tools = new ToolRegistry();
-  let context = "";
   let configuredModel: string | undefined;
   // A git repository, or else a plain folder that looks like a project (files only, no history).
   const project = resolveProject();
   if (project) {
     tools.registerAll(createRepoTools(project.root, project.kind));
     configuredModel = loadConfig(project.root)?.model;
-    const where = project.kind === "git" ? "repository" : "project folder (it is not a git repository, so there is no commit history)";
-    // A small model asked "what is this project?" tends to answer "I need more context" instead of reaching for
-    // a tool, so hand it the overview up front and keep the tools for details that aren't in it.
-    context = `Overview of the ${where} the user is in (already gathered for you — use the tools only for details not shown here):\n${gatherRepoOverview(project.root, project.kind).text}\n\n---\n`;
   } else {
-    // Nothing to look at: ask still works for general questions, but the model must be told it is blind. Without
-    // this it invents a plausible project (file lists, commits, even work-item numbers) to answer "what about this repo?".
     logger.warn("No project found here (not a git repository, and this folder has no source files) — I can only answer general questions.");
-    context = `${NO_REPOSITORY_NOTE}\n\n---\n`;
   }
 
-  const { model, info } = await ensureModel(configuredModel);
-  const agent = createSession(model, tools);
+  // The model is loaded first because its context window decides how much of the project overview fits.
+  const { model, info, alias } = await ensureModel(configuredModel);
+  const asked = clarifyBroadQuestion(question);
+
+  const buildContext = (contextLength: number | undefined): string => {
+    if (!project) {
+      // Nothing to look at: ask still works for general questions, but the model must be told it is blind. Without
+      // this it invents a plausible project (file lists, commits, even work-item numbers) to answer "what about this repo?".
+      return `${NO_REPOSITORY_NOTE}\n\n---\n`;
+    }
+    const where = project.kind === "git" ? "repository" : "project folder (it is not a git repository, so there is no commit history)";
+    const heading = `Overview of the ${where} the user is in (already gathered for you — use the tools only for details not shown here):\n`;
+    const tail = "\n\n---\n";
+    const fixedChars = ASK_SYSTEM_PROMPT.length + toolDefinitionChars(tools.definitions()) + heading.length + tail.length + asked.length + 20;
+    const budget = inputCharBudget(contextLength, outputTokenBudget(contextLength), fixedChars);
+    const overview = gatherRepoOverview(project.root, project.kind, { maxChars: budget }).text;
+    if (opts.verbose) logger.info(`  context window: ${contextLength ?? "unknown"} tokens; overview trimmed to ${overview.length} characters`);
+    // A small model asked "what is this project?" tends to answer "I need more context" instead of reaching for
+    // a tool, so hand it the overview up front and keep the tools for details that aren't in it.
+    return `${heading}${overview}${tail}`;
+  };
+
   try {
     const startedAt = Date.now();
-    const answer = await runTurn(agent, ASK_SYSTEM_PROMPT, `${context}Question: ${clarifyBroadQuestion(question)}`, tools, {
-      verbose: opts.verbose,
-      statusLabel: "Thinking",
-      disableThinking: true,
-    });
+    const answer = await runWithContextRetry(
+      { known: contextWindow(model, info, alias), remember: (n) => rememberContextWindow(alias, n) },
+      async (contextLength) => {
+        const agent = createSession(model, tools, { contextLength });
+        try {
+          return await runTurn(agent, ASK_SYSTEM_PROMPT, `${buildContext(contextLength)}Question: ${asked}`, tools, {
+            verbose: opts.verbose,
+            statusLabel: "Thinking",
+            disableThinking: true,
+          });
+        } finally {
+          agent.session.dispose();
+        }
+      }
+    );
 
     if (!answer.trim()) {
       logger.warn("Model returned no text output.");
@@ -66,7 +90,6 @@ export async function runAsk(question: string, opts: AskOptions = {}): Promise<v
     console.log("\n" + answer.trim() + "\n");
     logOnDeviceSummary(info, startedAt);
   } finally {
-    agent.session.dispose();
     shutdownFoundryLocal();
   }
 }

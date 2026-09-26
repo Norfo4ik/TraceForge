@@ -12,7 +12,7 @@ import {
   unregisteredProviders,
   type ModelVariant,
 } from "./accelerators.js";
-import { loadUserSettings, saveUserSettings } from "./config.js";
+import { getContextLimit, loadUserSettings, saveUserSettings, setContextLimit } from "./config.js";
 import { debugEnabled } from "../utils/debug.js";
 import { logger } from "../utils/logger.js";
 
@@ -365,6 +365,20 @@ export async function ensureModel(alias?: string): Promise<LoadedModel> {
   const info = model.info;
   logger.ok(`Model "${name}" ready on ${describeDevice(info)}`);
   return { model, info, alias: name, switchedFrom: target.switchedFrom };
+}
+
+/**
+ * The model's context window in tokens: the catalog's figure if it has one, otherwise a limit learned from an earlier
+ * overflow. Often unknown — the catalog doesn't report it for every model — in which case prompts start unbudgeted
+ * and the first overflow teaches us the real number (see runWithContextRetry).
+ */
+export function contextWindow(model: IModel, info: ModelInfo, alias: string): number | undefined {
+  return model.contextLength ?? info.contextLength ?? getContextLimit(alias) ?? undefined;
+}
+
+export function rememberContextWindow(alias: string, limit: number): void {
+  setContextLimit(alias, limit);
+  logger.info(`  ${alias} has a ${limit}-token context window; retrying with a prompt sized to it (remembered for next time).`);
 }
 
 /** One-line proof point for the demo: where inference ran and how long it took. */

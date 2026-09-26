@@ -6,7 +6,7 @@ import { runInit, type InitOptions } from "../commands/init.js";
 import { runInvestigate, type InvestigateOptions } from "../commands/investigate.js";
 import { saveUserCredentials, saveUserSettings } from "../core/config.js";
 import { ensureModel, keepFoundryLocalAlive, shutdownFoundryLocal } from "../core/foundryModel.js";
-import { VERSION } from "../version.js";
+import { VERSION_LABEL } from "../version.js";
 import { logger } from "../utils/logger.js";
 import { clearScreen, renderLogo } from "./logo.js";
 import { BackToMenu, isUserCancel, terminalPrompter, type Choice, type Prompter } from "./prompter.js";
@@ -258,7 +258,7 @@ export async function runInteractive(): Promise<void> {
       },
       draw: (status) => {
         clearScreen();
-        console.log(renderLogo({ columns: process.stdout.columns ?? 80, version: VERSION }));
+        console.log(renderLogo({ columns: process.stdout.columns ?? 80, version: VERSION_LABEL }));
         console.log(renderStatus(status));
         console.log();
       },

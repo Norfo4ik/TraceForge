@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { VERSION } from "../version.js";
+import { BUILD_COMMIT, VERSION, VERSION_LABEL } from "../version.js";
 import { renderStatus, type Status } from "./status.js";
 
 describe("renderStatus", () => {
@@ -59,5 +59,10 @@ describe("VERSION", () => {
   it("matches package.json", () => {
     const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf-8"));
     expect(VERSION).toBe(pkg.version);
+  });
+
+  it("labels the build with its commit, or 'dev' when run from source", () => {
+    expect(VERSION_LABEL).toBe(`${VERSION} (${BUILD_COMMIT})`);
+    expect(BUILD_COMMIT).toBe("dev"); // tests run from source, where the build stamp isn't injected
   });
 });

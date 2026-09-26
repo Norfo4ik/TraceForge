@@ -1,13 +1,22 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import ora from "ora";
-import { ensureModel, describeDevice, logOnDeviceSummary, shutdownFoundryLocal } from "../core/foundryModel.js";
+import {
+  contextWindow,
+  describeDevice,
+  ensureModel,
+  logOnDeviceSummary,
+  rememberContextWindow,
+  shutdownFoundryLocal,
+} from "../core/foundryModel.js";
+import { runWithContextRetry } from "../core/contextRetry.js";
 import { createSession, runTurn } from "../core/agentLoop.js";
 import { ToolRegistry } from "../core/toolRegistry.js";
 import { gatherRepoOverview, getRepoRoot, searchRepoForTerms } from "../core/repoTools.js";
 import { connectAdoMcp, type AdoMcpConnection } from "../core/adoMcpClient.js";
 import { extractSearchTerms, fetchWorkItemBrief, formatCommentBody, postWorkItemComment } from "../core/adoWorkItem.js";
 import { loadConfig, loadAdoCredentials } from "../core/config.js";
+import { inputCharBudget, outputTokenBudget, truncateText } from "../core/contextBudget.js";
 import { INVESTIGATE_SYSTEM_PROMPT } from "../prompts/systemPrompts.js";
 import { logger } from "../utils/logger.js";
 import { confirm } from "../utils/prompt.js";
@@ -82,20 +91,44 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
     const hitsText = hits.length
       ? hits.map((h) => `Term "${h.term}":\n${h.matches.map((m) => `  ${m}`).join("\n")}`).join("\n")
       : "(no matches)";
-    const overview = gatherRepoOverview(repoRoot);
-    const userMessage =
-      `${brief.text}\n\n---\nKeyword search of the repository (terms taken from the work item; matches can be coincidental):\n${hitsText}` +
-      `\n\n---\nRepository overview:\n${overview.text}\n\nWrite the investigation report now.`;
-
+    // The model is loaded first because its context window decides how much of each part fits in the prompt. The work item
+    // and the search hits get bounded shares; the repository overview takes whatever is left.
     const { model, info, alias } = await ensureModel(config.model);
-    agent = createSession(model);
+    const hitsHeading = "\n\n---\nKeyword search of the repository (terms taken from the work item; matches can be coincidental):\n";
+    const overviewHeading = "\n\n---\nRepository overview:\n";
+    const closing = "\n\nWrite the investigation report now.";
+    const buildMessage = (contextLength: number | undefined): string => {
+      const available = inputCharBudget(
+        contextLength,
+        outputTokenBudget(contextLength),
+        INVESTIGATE_SYSTEM_PROMPT.length + hitsHeading.length + overviewHeading.length + closing.length
+      );
+      const briefText = truncateText(brief.text, Math.floor(available * 0.4));
+      const hitsShown = truncateText(hitsText, Math.floor(available * 0.2));
+      const overview = gatherRepoOverview(repoRoot, "git", { maxChars: Math.max(0, available - briefText.length - hitsShown.length) });
+      if (opts.verbose) {
+        logger.info(`  context window: ${contextLength ?? "unknown"} tokens; work item ${briefText.length}, search ${hitsShown.length}, overview ${overview.text.length} characters`);
+      }
+      return `${briefText}${hitsHeading}${hitsShown}${overviewHeading}${overview.text}${closing}`;
+    };
+
     const startedAt = Date.now();
-    const report = await runTurn(agent, INVESTIGATE_SYSTEM_PROMPT, userMessage, new ToolRegistry(), {
-      verbose: opts.verbose,
-      statusLabel: `Analyzing ${brief.type} #${brief.id}`,
-      disableThinking: true,
-      requireHeading: true,
-    });
+    const report = await runWithContextRetry(
+      { known: contextWindow(model, info, alias), remember: (n) => rememberContextWindow(alias, n) },
+      async (contextLength) => {
+        agent = createSession(model, undefined, { contextLength });
+        try {
+          return await runTurn(agent, INVESTIGATE_SYSTEM_PROMPT, buildMessage(contextLength), new ToolRegistry(), {
+            verbose: opts.verbose,
+            statusLabel: `Analyzing ${brief.type} #${brief.id}`,
+            disableThinking: true,
+            requireHeading: true,
+          });
+        } finally {
+          agent.session.dispose();
+        }
+      }
+    );
 
     const document = `# Investigation: ${brief.type} #${brief.id} — ${brief.title}\n\n${report.trim()}\n`;
     console.log("\n" + document);

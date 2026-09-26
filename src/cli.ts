@@ -12,7 +12,7 @@ import { runMcpServer } from "./commands/mcp.js";
 import { renderLogo } from "./ui/logo.js";
 import { runInteractive } from "./ui/menu.js";
 import { logger } from "./utils/logger.js";
-import { VERSION } from "./version.js";
+import { VERSION_LABEL } from "./version.js";
 
 // A .env in the current repo wins; otherwise fall back to a per-user file so credentials are set up once for all repos.
 // (dotenv never overrides a variable that is already set, so the order here is the priority.)
@@ -24,8 +24,8 @@ const program = new Command();
 program
   .name("traceforge")
   .description("TraceForge — trace work items to code with on-device AI. Run with no arguments for the interactive menu.")
-  .version(VERSION)
-  .addHelpText("beforeAll", renderLogo({ columns: process.stdout.columns ?? 80, version: VERSION }));
+  .version(VERSION_LABEL)
+  .addHelpText("beforeAll", renderLogo({ columns: process.stdout.columns ?? 80, version: VERSION_LABEL }));
 
 program
   .command("doctor")

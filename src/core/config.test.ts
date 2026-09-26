@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadUserSettings, saveUserCredentials, saveUserSettings } from "./config.js";
+import { getContextLimit, loadUserSettings, saveUserCredentials, saveUserSettings, setContextLimit } from "./config.js";
 
 describe("user settings", () => {
   it("reports no decision when there is no file, and remembers yes/no once saved", () => {
@@ -27,6 +27,25 @@ describe("user settings", () => {
     const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
     writeFileSync(join(dir, "settings.json"), '{"blockedBuilds":["ok:1",7,null]}');
     expect(loadUserSettings(dir).blockedBuilds).toEqual(["ok:1"]);
+  });
+
+  it("remembers learned context windows per model without disturbing other settings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
+    saveUserSettings({ accelerators: true }, dir);
+    expect(getContextLimit("phi-4-mini", dir)).toBeUndefined();
+    setContextLimit("phi-4-mini", 4224, dir);
+    setContextLimit("qwen2.5-7b", 8192, dir);
+    expect(getContextLimit("phi-4-mini", dir)).toBe(4224);
+    expect(getContextLimit("qwen2.5-7b", dir)).toBe(8192);
+    expect(loadUserSettings(dir).accelerators).toBe(true);
+    setContextLimit("phi-4-mini", 2048, dir); // a tighter limit replaces the old one
+    expect(getContextLimit("phi-4-mini", dir)).toBe(2048);
+  });
+
+  it("ignores junk in the context-limits map", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tf-set-"));
+    writeFileSync(join(dir, "settings.json"), '{"contextLimits":{"ok":4096,"bad":"x","neg":-5,"nan":null}}');
+    expect(loadUserSettings(dir).contextLimits).toEqual({ ok: 4096 });
   });
 
   it("treats a corrupt or wrongly-typed file as no decision instead of failing", () => {

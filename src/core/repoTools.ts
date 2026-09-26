@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
+import { truncateText } from "./contextBudget.js";
 import { grepFiles, looksLikeProject, walkProject, type ProjectKind } from "./projectFiles.js";
 import type { ToolHandler } from "./toolRegistry.js";
 
@@ -58,12 +59,32 @@ export function isNoisePath(path: string): boolean {
   return NOISE_FILES.test(path) || path.startsWith(".traceforge/") || path === "docs/GENERATED_OVERVIEW.md";
 }
 
+export interface OverviewOptions {
+  /** Largest overview to return, in characters. The overview shrinks in steps until it fits (see OVERVIEW_LEVELS). */
+  maxChars?: number;
+}
+
+// From the full picture down to the bare minimum. A big repository's full overview can be ~12k characters, which
+// alone overflows a 4k-token model window, so the overview is built at the largest level that fits the budget.
+const OVERVIEW_LEVELS = [
+  { files: 100, keyFiles: 5, readmeChars: 2500, otherChars: 2000, commits: 10 },
+  { files: 50, keyFiles: 4, readmeChars: 1200, otherChars: 900, commits: 8 },
+  { files: 25, keyFiles: 3, readmeChars: 600, otherChars: 450, commits: 5 },
+  { files: 12, keyFiles: 2, readmeChars: 350, otherChars: 250, commits: 3 },
+  { files: 6, keyFiles: 1, readmeChars: 250, otherChars: 200, commits: 2 },
+];
+
 /**
  * Collects the real facts an onboarding doc should be built from — tracked file list, the
  * manifest/README/entry-point contents, and recent commits — so the model summarizes evidence
- * instead of guessing what "a typical repo" contains.
+ * instead of guessing what "a typical repo" contains. With `maxChars`, the overview is made smaller
+ * (fewer files, shorter excerpts, fewer commits) until it fits the model's context window.
  */
-export function gatherRepoOverview(repoRoot: string, kind: ProjectKind = "git"): { text: string; fileCount: number } {
+export function gatherRepoOverview(
+  repoRoot: string,
+  kind: ProjectKind = "git",
+  options: OverviewOptions = {}
+): { text: string; fileCount: number } {
   const walked = kind === "git" ? undefined : walkProject(repoRoot);
   const files = (walked ? walked.files : git(repoRoot, ["ls-files"]).split("\n")).filter((f) => f && !isNoisePath(f));
   // Shallowest match wins, so a solution-style layout (Repo/Project/Program.cs) is found as well as a flat one.
@@ -85,31 +106,54 @@ export function gatherRepoOverview(repoRoot: string, kind: ProjectKind = "git"):
     ),
   ].slice(0, 5);
 
-  const label = kind === "git" ? "Tracked files" : "Project files";
-  const partial = walked?.truncated ? ", folder is larger than the scan limit" : "";
-  const sections: string[] = [
-    `${label} (${files.length}${files.length > 100 ? ", first 100 shown" : ""}${partial}):\n${files.slice(0, 100).join("\n")}`,
-  ];
+  // Read everything once; each level below only slices what it needs.
+  const keyFiles: Array<{ rel: string; content: string }> = [];
   for (const rel of keyPaths) {
     try {
-      const content = readFileSync(resolveInRepo(repoRoot, rel), "utf-8");
-      const max = /^readme/i.test(rel) ? 2500 : 2000;
-      sections.push(`--- ${rel} ---\n${content.length > max ? `${content.slice(0, max)}\n… [truncated]` : content}`);
+      keyFiles.push({ rel, content: readFileSync(resolveInRepo(repoRoot, rel), "utf-8") });
     } catch {
       // unreadable file — skip
     }
   }
-  if (kind === "folder") {
-    sections.push("--- Recent commits ---\n(this is a plain folder, not a git repository — there is no commit history)");
-  } else {
+  let commitLines: string[] | undefined;
+  if (kind === "git") {
     try {
-      const log = git(repoRoot, ["log", "--max-count=10", "--pretty=format:%h %ad %an: %s", "--date=short"]).trim();
-      sections.push(`--- Recent commits ---\n${log || "(no commits yet)"}`);
+      commitLines = git(repoRoot, ["log", "--max-count=10", "--pretty=format:%h %ad %an: %s", "--date=short"])
+        .trim()
+        .split("\n")
+        .filter(Boolean);
     } catch {
-      sections.push("--- Recent commits ---\n(no commits yet)");
+      commitLines = [];
     }
   }
-  return { text: sections.join("\n\n"), fileCount: files.length };
+
+  const label = kind === "git" ? "Tracked files" : "Project files";
+  const partial = walked?.truncated ? ", folder is larger than the scan limit" : "";
+  const render = (level: (typeof OVERVIEW_LEVELS)[number]): string => {
+    const listed = files.slice(0, level.files);
+    const sections: string[] = [
+      `${label} (${files.length}${files.length > listed.length ? `, first ${listed.length} shown` : ""}${partial}):\n${listed.join("\n")}`,
+    ];
+    for (const { rel, content } of keyFiles.slice(0, level.keyFiles)) {
+      const max = /^readme/i.test(rel) ? level.readmeChars : level.otherChars;
+      sections.push(`--- ${rel} ---\n${content.length > max ? `${content.slice(0, max)}\n… [truncated]` : content}`);
+    }
+    if (kind === "folder") {
+      sections.push("--- Recent commits ---\n(this is a plain folder, not a git repository — there is no commit history)");
+    } else {
+      const shown = (commitLines ?? []).slice(0, level.commits);
+      sections.push(`--- Recent commits ---\n${shown.length ? shown.join("\n") : "(no commits yet)"}`);
+    }
+    return sections.join("\n\n");
+  };
+
+  const limit = options.maxChars ?? Number.POSITIVE_INFINITY;
+  let text = "";
+  for (const level of OVERVIEW_LEVELS) {
+    text = render(level);
+    if (text.length <= limit) break;
+  }
+  return { text: truncateText(text, limit), fileCount: files.length };
 }
 
 /**

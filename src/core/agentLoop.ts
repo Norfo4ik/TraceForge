@@ -1,6 +1,13 @@
 import { ChatSession, Item, Request, type IModel, type ToolCallItem } from "foundry-local-sdk";
 import ora from "ora";
 import type { ToolRegistry } from "./toolRegistry.js";
+import {
+  contextOverflowMessage,
+  outputTokenBudget,
+  parseContextOverflow,
+  toolResultCharLimit,
+  truncateText,
+} from "./contextBudget.js";
 import { debugEnabled } from "../utils/debug.js";
 import { logger } from "../utils/logger.js";
 
@@ -197,6 +204,11 @@ export interface AgentSession {
   primed: boolean;
   /** Qwen3 models "think out loud" by default; appending "/no_think" to a user turn is their official off switch. */
   readonly supportsNoThink: boolean;
+  /** The model's context window in tokens, when the runtime reports it. Prompts, answers and tool results are sized to it. */
+  readonly contextLength?: number;
+  /** Longest tool result fed back to the model — a file read can otherwise be bigger than a small window. */
+  readonly maxToolResultChars: number;
+  readonly modelAlias: string;
 }
 
 // Without a cap, an unbounded generation (especially this model's visible "reasoning" chain-of-thought)
@@ -210,11 +222,32 @@ export interface AgentSession {
 // the input prompt itself), not better — this backend likely doesn't implement them correctly.
 const MAX_OUTPUT_TOKENS = 1200;
 
-export function createSession(model: IModel, tools?: ToolRegistry): AgentSession {
+export function createSession(model: IModel, tools?: ToolRegistry, options: { contextLength?: number } = {}): AgentSession {
+  // An explicit window (learned from an earlier overflow) wins over the catalog metadata, which may be missing or wrong.
+  const contextLength = options.contextLength ?? model.contextLength ?? model.info.contextLength ?? undefined;
   const session = new ChatSession(model);
-  session.setOptions({ search: { maxOutputTokens: MAX_OUTPUT_TOKENS } });
+  // On a small window (the phi-4-mini NPU build has 4,224 tokens) the answer space is shrunk so the input still fits.
+  session.setOptions({ search: { maxOutputTokens: outputTokenBudget(contextLength, MAX_OUTPUT_TOKENS) } });
   tools?.attachTo(session);
-  return { session, primed: false, supportsNoThink: /qwen3/i.test(model.alias) };
+  return {
+    session,
+    primed: false,
+    supportsNoThink: /qwen3/i.test(model.alias),
+    contextLength,
+    maxToolResultChars: toolResultCharLimit(contextLength),
+    modelAlias: model.alias,
+  };
+}
+
+/** The prompt (plus the reserved answer) didn't fit the model's window. Carries the window size the runtime reported. */
+export class ContextOverflowError extends Error {
+  constructor(
+    message: string,
+    readonly limit: number
+  ) {
+    super(message);
+    this.name = "ContextOverflowError";
+  }
 }
 
 export interface RunTurnOptions {
@@ -281,6 +314,10 @@ export async function runTurn(
   const status = startStatus(options.statusLabel);
   try {
     return await runTurnInner(agent, systemPrompt, userMessage, tools, options, status);
+  } catch (err) {
+    const overflow = parseContextOverflow(err instanceof Error ? err.message : String(err));
+    if (overflow) throw new ContextOverflowError(contextOverflowMessage(agent.modelAlias, overflow), overflow.limit);
+    throw err;
   } finally {
     status.stop();
   }
@@ -325,7 +362,7 @@ async function runTurnInner(
         if (options.verbose) {
           status.log(() => logger.info(`  tool call: ${call.name}(${call.arguments})`));
         }
-        const result = await tools.execute(call.name, call.arguments);
+        const result = truncateText(await tools.execute(call.name, call.arguments), agent.maxToolResultChars);
         followUp.addItem(Item.toolResult(call.callId, result));
       }
       status.update(options.statusLabel ?? "Thinking");
@@ -372,7 +409,7 @@ async function runTurnInner(
           logger.info(`  tool call: ${pseudo.name}(${JSON.stringify(pseudo.args)})`);
         });
       }
-      const result = await tools.execute(pseudo.name, JSON.stringify(pseudo.args));
+      const result = truncateText(await tools.execute(pseudo.name, JSON.stringify(pseudo.args)), agent.maxToolResultChars);
       const followUp = new Request();
       followUp.addItem(
         Item.userMessage(
