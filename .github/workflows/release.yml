@@ -1,0 +1,46 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching package.json's version) to publish a release. The release carries:
+#   traceforge.tgz - what install.ps1 and "traceforge update" install (a fixed name, so /releases/latest/download/ works)
+#   install.ps1    - the one-line installer
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Tag must match package.json
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version ($expected)." >&2
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+
+      - name: Pack
+        shell: bash
+        run: |
+          npm pack --silent
+          mv traceforge-*.tgz traceforge.tgz
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" traceforge.tgz install.ps1 --title "TraceForge $GITHUB_REF_NAME" --generate-notes

@@ -37,6 +37,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
     project,
     domains,
     model: opts.model ?? existing?.model,
+    ...(existing?.wiki === undefined ? {} : { wiki: existing.wiki }),
   };
   saveConfig(repoRoot, config);
   logger.ok("Saved configuration to .traceforge/config.json");

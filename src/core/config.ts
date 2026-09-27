@@ -8,6 +8,8 @@ const ConfigSchema = z.object({
   project: z.string(),
   domains: z.array(z.string()).default(["core", "work-items", "repositories"]),
   model: z.string().optional(),
+  /** Set to false to stop Ask and Investigate from looking things up in the Azure DevOps wiki. On by default. */
+  wiki: z.boolean().optional(),
 });
 
 export type TraceForgeConfig = z.infer<typeof ConfigSchema>;

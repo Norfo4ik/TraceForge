@@ -6,11 +6,17 @@
   "bin": {
     "traceforge": "dist/cli.js"
   },
+  "files": [
+    "dist/cli.js",
+    "README.md",
+    ".env.example"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsup",
+    "prepack": "npm run build",
     "dev": "tsx src/cli.ts",
     "test": "vitest run"
   },
@@ -31,5 +37,9 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Norfo4ik/TraceForge.git"
   }
 }

@@ -16,6 +16,8 @@ import { gatherRepoOverview, getRepoRoot, searchRepoForTerms } from "../core/rep
 import { connectAdoMcp, type AdoMcpConnection } from "../core/adoMcpClient.js";
 import { extractSearchTerms, fetchWorkItemBrief, formatCommentBody, postWorkItemComment } from "../core/adoWorkItem.js";
 import { loadConfig, loadAdoCredentials } from "../core/config.js";
+import { formatWikiForPrompt, WIKI_DOMAINS } from "../core/adoWiki.js";
+import { logWikiSources, lookupWikiWith, wikiEnabled } from "../core/wikiContext.js";
 import { inputCharBudget, outputTokenBudget, truncateText } from "../core/contextBudget.js";
 import { INVESTIGATE_SYSTEM_PROMPT } from "../prompts/systemPrompts.js";
 import { logger } from "../utils/logger.js";
@@ -42,6 +44,7 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
     throw new Error('No Azure DevOps configuration found. Run "traceforge init --org <org> --project <project>" first.');
   }
   const creds = loadAdoCredentials();
+  const useWiki = wikiEnabled(config);
 
   let ado: AdoMcpConnection | undefined;
   let agent: ReturnType<typeof createSession> | undefined;
@@ -50,7 +53,7 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
     try {
       ado = await connectAdoMcp({
         organization: config.organization,
-        domains: ["work-items"],
+        domains: useWiki ? ["work-items", ...WIKI_DOMAINS] : ["work-items"],
         email: creds.email,
         pat: creds.pat,
         verbose: opts.verbose,
@@ -70,6 +73,10 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
       fetching.fail(`Could not fetch work item #${workItemId}`);
       throw err;
     }
+    // Team wiki pages about the same subject (runbooks, known issues), looked up while the connection is open.
+    const wikiPages = useWiki ? await lookupWikiWith(ado, config.project, brief.searchableText) : [];
+    if (opts.verbose) logWikiSources(wikiPages);
+
     // Only keep the connection open if we'll need it again to post the comment.
     if (!opts.postComment) {
       await ado.close();
@@ -97,19 +104,27 @@ export async function runInvestigate(workItemId: string, opts: InvestigateOption
     const hitsHeading = "\n\n---\nKeyword search of the repository (terms taken from the work item; matches can be coincidental):\n";
     const overviewHeading = "\n\n---\nRepository overview:\n";
     const closing = "\n\nWrite the investigation report now.";
+    const wikiSeparator = "\n\n---\n";
     const buildMessage = (contextLength: number | undefined): string => {
       const available = inputCharBudget(
         contextLength,
         outputTokenBudget(contextLength),
-        INVESTIGATE_SYSTEM_PROMPT.length + hitsHeading.length + overviewHeading.length + closing.length
+        INVESTIGATE_SYSTEM_PROMPT.length + hitsHeading.length + overviewHeading.length + closing.length + wikiSeparator.length
       );
-      const briefText = truncateText(brief.text, Math.floor(available * 0.4));
-      const hitsShown = truncateText(hitsText, Math.floor(available * 0.2));
-      const overview = gatherRepoOverview(repoRoot, "git", { maxChars: Math.max(0, available - briefText.length - hitsShown.length) });
+      // Shares of what the window leaves: the work item is the subject, so it gets the most; the overview takes the rest.
+      const briefText = truncateText(brief.text, Math.floor(available * 0.35));
+      const hitsShown = truncateText(hitsText, Math.floor(available * 0.15));
+      const wiki = formatWikiForPrompt(wikiPages, Number.isFinite(available) ? Math.floor(available * 0.25) : 12_000);
+      const overview = gatherRepoOverview(repoRoot, "git", {
+        maxChars: Math.max(0, available - briefText.length - hitsShown.length - wiki.length),
+      });
       if (opts.verbose) {
-        logger.info(`  context window: ${contextLength ?? "unknown"} tokens; work item ${briefText.length}, search ${hitsShown.length}, overview ${overview.text.length} characters`);
+        logger.info(
+          `  context window: ${contextLength ?? "unknown"} tokens; work item ${briefText.length}, search ${hitsShown.length}, wiki ${wiki.length}, overview ${overview.text.length} characters`
+        );
       }
-      return `${briefText}${hitsHeading}${hitsShown}${overviewHeading}${overview.text}${closing}`;
+      const wikiBlock = wiki ? `${wikiSeparator}${wiki}` : "";
+      return `${briefText}${hitsHeading}${hitsShown}${wikiBlock}${overviewHeading}${overview.text}${closing}`;
     };
 
     const startedAt = Date.now();

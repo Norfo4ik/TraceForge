@@ -2,6 +2,7 @@ import { execFileSync, execSync } from "node:child_process";
 import ora from "ora";
 import { isNpuProvider } from "../core/accelerators.js";
 import { connectAdoMcp } from "../core/adoMcpClient.js";
+import { checkWikiAccess, describeWikiFailure, WIKI_DOMAINS } from "../core/adoWiki.js";
 import { loadConfig, saveUserSettings } from "../core/config.js";
 import {
   acceleratedModels,
@@ -174,9 +175,20 @@ async function checkAzureDevOps(checkLive: boolean): Promise<void> {
   if (checkLive && config && email && pat) {
     const spinner = ora("Connecting to Azure DevOps…").start();
     try {
-      const ado = await connectAdoMcp({ organization: config.organization, domains: ["work-items"], email, pat });
-      await ado.close();
+      const ado = await connectAdoMcp({ organization: config.organization, domains: ["work-items", ...WIKI_DOMAINS], email, pat });
       spinner.succeed("Connected to Azure DevOps");
+      try {
+        const wiki = await checkWikiAccess(ado, config.project);
+        if (wiki.ok && wiki.wikis.length > 0) {
+          logger.ok(`Wiki: ${wiki.wikis.length} wiki${wiki.wikis.length === 1 ? "" : "s"} readable (${wiki.wikis.slice(0, 3).join(", ")})`);
+        } else if (wiki.ok) {
+          logger.info(`Wiki: readable, but project "${config.project}" has no wiki yet — Ask and Investigate will skip it.`);
+        } else {
+          logger.warn(`Wiki: ${describeWikiFailure({ status: "unavailable", reason: wiki.reason, detail: wiki.detail })}`);
+        }
+      } finally {
+        await ado.close();
+      }
     } catch (err) {
       spinner.fail(`Could not connect: ${(err as Error).message}`);
     }
